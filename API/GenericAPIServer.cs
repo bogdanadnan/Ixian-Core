@@ -21,6 +21,7 @@ using System.Linq;
 using System.Net;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace IXICore
 {
@@ -88,6 +89,8 @@ namespace IXICore
 
     public class GenericAPIServer
     {
+        private const int requestsConcurrency = 10;
+
         protected HttpListener listener;
         protected Thread apiControllerThread;
         protected bool continueRunning;
@@ -469,6 +472,8 @@ namespace IXICore
 
         protected void apiLoop()
         {
+            var sem = new Semaphore(Environment.ProcessorCount * requestsConcurrency, Environment.ProcessorCount * requestsConcurrency);
+
             // Start a listener on the loopback interface
             listener = new HttpListener();
             try
@@ -520,14 +525,32 @@ namespace IXICore
                         }
                         if (isAuthorized(context))
                         {
-                            onUpdate(context);
+                            sem.WaitOne();
+
+                            Task.Run(() =>
+                            {
+                                try
+                                {
+                                    onUpdate(context);
+                                }
+                                catch (Exception)
+                                {
+                                    context.Response.StatusCode = 500;
+                                    context.Response.StatusDescription = "500 Internal server error";
+                                }
+                                finally
+                                {
+                                    sem.Release();
+                                    context.Response.Close();
+                                }
+                            });
                         }
                         else
                         {
                             context.Response.StatusCode = 401;
                             context.Response.StatusDescription = "401 Unauthorized";
+                            context.Response.Close();
                         }
-                        context.Response.Close();
                     }
                 }catch(Exception e)
                 {
