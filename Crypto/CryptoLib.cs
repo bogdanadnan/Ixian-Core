@@ -58,7 +58,7 @@ namespace IXICore
         /// <param name="keySize">Size of the new RSA key, in bits.</param>
         /// <param name="skip_header">Legacy parameter to allow generating older Ixian keys.</param>
         /// <returns>A new RSA key pair and associated Ixian data.</returns>
-        IxianKeyPair generateKeys(int keySize, bool skip_header = false);
+        IxianKeyPair generateKeys(int keySize, int version);
 
         /// <summary>
         ///  Generates a cryptographic signature for the input data, using the provided private key in the Ixian serialized format.
@@ -178,7 +178,7 @@ namespace IXICore
         /// <param name="parentKey">RSA private key in Ixian serialized format.</param>
         /// <param name="seed">A unique seed value.</param>
         /// <returns>A new RSA key in Ixian serialized format.</returns>
-        byte[] generateChildKey(byte[] parentKey, int seed = 0);
+        byte[] generateChildKey(byte[] parentKey, int version, int seed);
 
         /// <summary>
         ///  Verifies that the provided Ixian key pair are valid, working RSA keys. Both encryption and signing are tested and the 
@@ -195,6 +195,54 @@ namespace IXICore
         /// <param name="length">Length of the random data.</param>
         /// <returns>Byte array of cryptographically secure random data.</returns>
         byte[] getSecureRandomBytes(int length);
+
+        /// <summary>
+        ///  Computes a SHA3-256 value of the given data. It is possible to calculate the hash for a subset of the input data by
+        ///  using the `offset` and `count` parameters.
+        /// </summary>
+        /// <param name="data">Source data for hashing.</param>
+        /// <param name="offset">Byte offset into the data. Default = 0</param>
+        /// <param name="count">Number of bytes to use in the calculation. Default, 0, means use all available bytes.</param>
+        /// <returns>SHA3-256 hash of the input data.</returns>
+        byte[] sha3_256(byte[] input, int offset = 0, int count = 0);
+
+        /// <summary>
+        ///  Computes a SHA3-512 value of the given data. It is possible to calculate the hash for a subset of the input data by
+        ///  using the `offset` and `count` parameters.
+        /// </summary>
+        /// <param name="data">Source data for hashing.</param>
+        /// <param name="offset">Byte offset into the data. Default = 0</param>
+        /// <param name="count">Number of bytes to use in the calculation. Default, 0, means use all available bytes.</param>
+        /// <returns>SHA3-512 hash of the input data.</returns>
+        byte[] sha3_512(byte[] input, int offset = 0, int count = 0);
+
+        /// <summary>
+        ///  Computes a (SHA3-512)^2 value of the given data. It is possible to calculate the hash for a subset of the input data by
+        ///  using the `offset` and `count` parameters.
+        /// </summary>
+        /// <remarks>
+        ///  The term (SHA3-512)^2 in this case means hashing the value twice - e.g. using SHA3-512 again on the computed hash value.
+        /// </remarks>
+        /// <param name="input">Source data for hashing.</param>
+        /// <param name="offset">Byte offset into the data. Default = 0</param>
+        /// <param name="count">Number of bytes to use in the calculation. Default, 0, means use all available bytes.</param>
+        /// <returns>SHA3-512 squared hash of the input data.</returns>
+        byte[] sha3_512sq(byte[] input, int offset = 0, int count = 0);
+
+        /// <summary>
+        ///  Computes a trunc(N, (SHA3-512)^2) value of the given data. It is possible to calculate the hash for a subset of the input data by
+        ///  using the `offset` and `count` parameters.
+        /// </summary>
+        /// <remarks>
+        ///  The term (SHA3-512)^2 in this case means hashing the value twice - e.g. using SHA3-512 again on the computed hash value.
+        ///  The trunc(N, X) function represents taking only the first `N` bytes of the byte-field `X`.
+        /// </remarks>
+        /// <param name="input">Source data for hashing.</param>
+        /// <param name="offset">Byte offset into the data. Default = 0</param>
+        /// <param name="count">Number of bytes to use in the calculation. Default, 0, means use all available bytes.</param>
+        /// <param name="hash_length">Number of bytes to keep from the truncated hash.</param>
+        /// <returns>SHA3-512 squared and truncated hash of the input data.</returns>
+        byte[] sha3_512sqTrunc(byte[] input, int offset = 0, int count = 0, int hashLength = 44);
     }
 
 
@@ -207,10 +255,10 @@ namespace IXICore
             _cryptoLib = crypto_lib;
         }
 
-        public IxianKeyPair generateKeys(int keySize, bool skip_header = false)
+        public IxianKeyPair generateKeys(int keySize, int addressVersion)
         {
             Trace.Assert(_cryptoLib != null);
-            return _cryptoLib.generateKeys(keySize, skip_header);
+            return _cryptoLib.generateKeys(keySize, addressVersion);
         }
 
         public byte[] getSignature(byte[] input, byte[] privateKey)
@@ -263,9 +311,9 @@ namespace IXICore
             return _cryptoLib.decryptWithChacha(input, key);
         }
 
-        public byte[] generateChildKey(byte[] parentKey, int seed = 0)
+        public byte[] generateChildKey(byte[] parentKey, int version, int seed)
         {
-            return _cryptoLib.generateChildKey(parentKey, seed);
+            return _cryptoLib.generateChildKey(parentKey, version, seed);
         }
 
         public bool testKeys(byte[] plaintext, IxianKeyPair kp)
@@ -276,6 +324,26 @@ namespace IXICore
         public byte[] getSecureRandomBytes(int length)
         {
             return _cryptoLib.getSecureRandomBytes(length);
+        }
+
+        public byte[] sha3_256(byte[] input, int offset = 0, int count = 0)
+        {
+            return _cryptoLib.sha3_256(input, offset, count);
+        }
+
+        public byte[] sha3_512(byte[] input, int offset = 0, int count = 0)
+        {
+            return _cryptoLib.sha3_512(input, offset, count);
+        }
+
+        public byte[] sha3_512sq(byte[] input, int offset = 0, int count = 0)
+        {
+            return _cryptoLib.sha3_512sq(input, offset, count);
+        }
+
+        public byte[] sha3_512sqTrunc(byte[] input, int offset = 0, int count = 0, int hashLength = 44)
+        {
+            return _cryptoLib.sha3_512sqTrunc(input, offset, count, hashLength);
         }
     }
 }

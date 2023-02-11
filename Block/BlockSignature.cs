@@ -22,8 +22,8 @@ namespace IXICore
         public ulong blockNum;
         public byte[] blockHash;
         public byte[] signature;
-        public byte[] signerAddress;
-        public SignerPowSolution powSoluton;
+        public Address recipientPubKeyOrAddress;
+        public SignerPowSolution powSolution;
 
         public BlockSignature()
         {
@@ -34,33 +34,40 @@ namespace IXICore
         {
             blockNum = src.blockNum;
 
-            if(src.blockHash != null)
+            if (src.blockHash != null)
             {
                 blockHash = new byte[src.blockHash.Length];
                 Array.Copy(src.blockHash, blockHash, blockHash.Length);
             }
 
-            signature = new byte[src.signature.Length];
-            Array.Copy(src.signature, signature, signature.Length);
-
-            signerAddress = new byte[src.signerAddress.Length];
-            Array.Copy(src.signerAddress, signerAddress, signerAddress.Length);
-
-            if(powSoluton != null)
+            if (src.signature != null)
             {
-                powSoluton = new SignerPowSolution(src.powSoluton);
+                signature = new byte[src.signature.Length];
+                Array.Copy(src.signature, signature, signature.Length);
+            }
+
+            byte[] address = src.recipientPubKeyOrAddress.getInputBytes();
+            recipientPubKeyOrAddress = new Address(address, null, false);
+
+            if (src.powSolution != null)
+            {
+                powSolution = new SignerPowSolution(src.powSolution);
             }
         }
 
         public BlockSignature(byte[] bytes, bool bytesFromBroadcast)
         {
+            if (bytes.Length > 2048)
+            {
+                throw new Exception("Signature length is bigger than 2048B.");
+            }
             try
             {
                 using (MemoryStream m = new MemoryStream(bytes))
                 {
                     using (BinaryReader reader = new BinaryReader(m))
                     {
-                        if(bytesFromBroadcast)
+                        if (bytesFromBroadcast)
                         {
                             ulong blockNum = reader.ReadIxiVarUInt();
 
@@ -68,16 +75,22 @@ namespace IXICore
                             blockHash = reader.ReadBytes(blockHashLen);
                         }
 
-                        int signatureLen = (int)reader.ReadIxiVarUInt();
-                        signature = reader.ReadBytes(signatureLen);
-
                         int signerAddressLen = (int)reader.ReadIxiVarUInt();
-                        signerAddress = reader.ReadBytes(signerAddressLen);
+                        recipientPubKeyOrAddress = new Address(reader.ReadBytes(signerAddressLen));
 
-                        int powSolutonLen = (int)reader.ReadIxiVarUInt();
-                        if(powSolutonLen > 0)
+                        int powSolutionLen = (int)reader.ReadIxiVarUInt();
+                        if (powSolutionLen > 0)
                         {
-                            powSoluton = new SignerPowSolution(reader.ReadBytes(powSolutonLen));
+                            powSolution = new SignerPowSolution(reader.ReadBytes(powSolutionLen), recipientPubKeyOrAddress);
+                        }
+
+                        if (m.Position < m.Length)
+                        {
+                            int signatureLen = (int)reader.ReadIxiVarUInt();
+                            if (signatureLen > 0)
+                            {
+                                signature = reader.ReadBytes(signatureLen);
+                            }
                         }
                     }
                 }
@@ -89,27 +102,38 @@ namespace IXICore
             }
         }
 
-        public byte[] getBytesForBlock()
+        public byte[] getBytesForBlock(bool includeSignature = true, bool compacted = false)
         {
-            using (MemoryStream m = new MemoryStream(1152))
+            using (MemoryStream m = new MemoryStream(1200))
             {
                 using (BinaryWriter writer = new BinaryWriter(m))
                 {
-                    writer.WriteIxiVarInt(signature.Length);
-                    writer.Write(signature);
-
-                    writer.WriteIxiVarInt(signerAddress.Length);
-                    writer.Write(signerAddress);
-
-                    if (powSoluton != null)
+                    byte[] address;
+                    if (compacted)
                     {
-                        byte[] powSolutionBytes = powSoluton.getBytes(false);
+                        address = recipientPubKeyOrAddress.addressNoChecksum;
+                    }else
+                    {
+                        address = recipientPubKeyOrAddress.getInputBytes();
+                    }
+                    writer.WriteIxiVarInt(address.Length);
+                    writer.Write(address);
+
+                    if (powSolution != null)
+                    {
+                        byte[] powSolutionBytes = powSolution.getBytes(compacted);
                         writer.WriteIxiVarInt(powSolutionBytes.Length);
                         writer.Write(powSolutionBytes);
                     }
                     else
                     {
                         writer.WriteIxiVarInt(0);
+                    }
+
+                    if(signature != null && includeSignature && !compacted)
+                    {
+                        writer.WriteIxiVarInt(signature.Length);
+                        writer.Write(signature);
                     }
 
 #if TRACE_MEMSTREAM_SIZES
@@ -132,20 +156,24 @@ namespace IXICore
                     writer.WriteIxiVarInt(blockHash.Length);
                     writer.Write(blockHash);
 
-                    writer.WriteIxiVarInt(signature.Length);
-                    writer.Write(signature);
+                    byte[] address = recipientPubKeyOrAddress.getInputBytes();
+                    writer.WriteIxiVarInt(address.Length);
+                    writer.Write(address);
 
-                    writer.WriteIxiVarInt(signerAddress.Length);
-                    writer.Write(signerAddress);
-
-                    if(powSoluton != null)
+                    if (powSolution != null)
                     {
-                        byte[] powSolutionBytes = powSoluton.getBytes(false);
+                        byte[] powSolutionBytes = powSolution.getBytes();
                         writer.WriteIxiVarInt(powSolutionBytes.Length);
                         writer.Write(powSolutionBytes);
                     }else
                     {
                         writer.WriteIxiVarInt(0);
+                    }
+
+                    if (signature != null)
+                    {
+                        writer.WriteIxiVarInt(signature.Length);
+                        writer.Write(signature);
                     }
 
 #if TRACE_MEMSTREAM_SIZES

@@ -189,13 +189,13 @@ namespace IXICore
                 }
 
                 int addrLen = (int)reader.ReadIxiVarUInt();
-                byte[] addr = reader.ReadBytes(addrLen);
                 if (addrLen > 70)
                 {
-                    Logging.error("Hello: Invalid address from {0} - {1}.", endpoint.getFullAddress(true), Base58Check.Base58CheckEncoding.EncodePlain(addr));
+                    Logging.error("Hello: Invalid address from {0}.", endpoint.getFullAddress(true));
                     sendBye(endpoint, ProtocolByeCode.rejected, "Invalid address", "", true);
                     return false;
                 }
+                Address addr = new Address(reader.ReadBytes(addrLen));
 
                 bool test_net = reader.ReadBoolean();
                 char node_type = reader.ReadChar();
@@ -249,7 +249,7 @@ namespace IXICore
                 }
 
                 // Check the address and pubkey and disconnect on mismatch
-                if (!addr.SequenceEqual((new Address(pubkey)).address))
+                if (!addr.addressNoChecksum.SequenceEqual(new Address(pubkey).addressNoChecksum))
                 {
                     Logging.warn("Hello: Pubkey and address do not match.");
                     sendBye(endpoint, ProtocolByeCode.authFailed, "Pubkey and address do not match.", "", true);
@@ -260,7 +260,7 @@ namespace IXICore
 
                 if (PeerStorage.isBlacklisted(addr) || PeerStorage.isBlacklisted(endpoint.getFullAddress(true)))
                 {
-                    Logging.warn("Hello: Connected node is blacklisted ({0} - {1}).", endpoint.getFullAddress(true), Base58Check.Base58CheckEncoding.EncodePlain(addr));
+                    Logging.warn("Hello: Connected node is blacklisted ({0} - {1}).", endpoint.getFullAddress(true), addr.ToString());
                     sendBye(endpoint, ProtocolByeCode.rejected, "Blacklisted", "", true);
                     return false;
                 }
@@ -325,7 +325,7 @@ namespace IXICore
 
 
                     // Check the address and local address and disconnect on mismatch
-                    if (endpoint.serverWalletAddress != null && !addr.SequenceEqual(endpoint.serverWalletAddress))
+                    if (endpoint.serverWalletAddress != null && !addr.addressNoChecksum.SequenceEqual(endpoint.serverWalletAddress.addressNoChecksum))
                     {
                         Logging.warn("Hello: Local address mismatch, possible Man-in-the-middle attack.");
                         sendBye(endpoint, ProtocolByeCode.addressMismatch, "Local address mismatch.", "", true);
@@ -347,13 +347,16 @@ namespace IXICore
                     {
                         if (node_type != 'R')
                         {
-                            // Check the wallet balance for the minimum amount of coins
-                            IxiNumber balance = IxianHandler.getWalletBalance(addr);
-                            if (balance < ConsensusConfig.minimumMasterNodeFunds)
+                            if (ConsensusConfig.minimumMasterNodeFunds > 0)
                             {
-                                Logging.warn("Hello: Rejected master node {0} due to insufficient funds: {1}", endpoint.getFullAddress(), balance.ToString());
-                                sendBye(endpoint, ProtocolByeCode.insufficientFunds, string.Format("Insufficient funds. Minimum is {0}", ConsensusConfig.minimumMasterNodeFunds), balance.ToString(), true);
-                                return false;
+                                // Check the wallet balance for the minimum amount of coins
+                                IxiNumber balance = IxianHandler.getWalletBalance(addr);
+                                if (balance < ConsensusConfig.minimumMasterNodeFunds)
+                                {
+                                    Logging.warn("Hello: Rejected master node {0} due to insufficient funds: {1}", endpoint.getFullAddress(), balance.ToString());
+                                    sendBye(endpoint, ProtocolByeCode.insufficientFunds, string.Format("Insufficient funds. Minimum is {0}", ConsensusConfig.minimumMasterNodeFunds), balance.ToString(), true);
+                                    return false;
+                                }
                             }
                         }
                         // Limit to one IP per masternode
@@ -429,7 +432,7 @@ namespace IXICore
                     writer.WriteIxiVarInt(6);
 
                     // Send the public node address
-                    byte[] address = IxianHandler.getWalletStorage().getPrimaryAddress();
+                    byte[] address = IxianHandler.getWalletStorage().getPrimaryAddress().addressWithChecksum;
                     writer.WriteIxiVarInt(address.Length);
                     writer.Write(address);
 
@@ -733,7 +736,7 @@ namespace IXICore
             Cuckoo filter = new Cuckoo(my_addresses.Count());
             foreach(var addr in my_addresses)
             {
-                filter.Add(addr.address);
+                filter.Add(addr.addressNoChecksum);
             }
             byte[] filter_data = filter.getFilterBytes();
             byte[] event_data = NetworkEvents.prepareEventMessageData(NetworkEvents.Type.transactionFrom, filter_data);
@@ -796,27 +799,6 @@ namespace IXICore
                     else
                     {
                         broadcastProtocolMessageToSingleRandomNode(new char[] { 'M', 'R', 'H' }, ProtocolMessageCode.getPresence2, mw.ToArray(), 0, null);
-                    }
-                }
-            }
-        }
-
-        public static void broadcastGetSignerPow(byte[] address, RemoteEndpoint endpoint)
-        {
-            using (MemoryStream mw = new MemoryStream())
-            {
-                using (BinaryWriter writer = new BinaryWriter(mw))
-                {
-                    writer.WriteIxiVarInt(address.Length);
-                    writer.Write(address);
-
-                    if (endpoint != null && endpoint.isConnected())
-                    {
-                        endpoint.sendData(ProtocolMessageCode.getSignerPow, mw.ToArray(), address);
-                    }
-                    else
-                    {
-                        broadcastProtocolMessageToSingleRandomNode(new char[] { 'M', 'R', 'H' }, ProtocolMessageCode.getSignerPow, mw.ToArray(), 0, null);
                     }
                 }
             }
@@ -896,28 +878,6 @@ namespace IXICore
                         Logging.warn("Disconnected v0");
                 }
             }
-        }
-
-        public static void broadcastSignerPow(byte[] address, SignerPowSolution signerPow, RemoteEndpoint skipEndpoint = null)
-        {
-            byte[] data = null;
-
-            using (MemoryStream mw = new MemoryStream())
-            {
-                using (BinaryWriter w = new BinaryWriter(mw))
-                {
-                    w.WriteIxiVarInt(address.Length);
-                    w.Write(address);
-
-                    byte[] signerPowBytes = signerPow.getBytes(true);
-                    w.WriteIxiVarInt(signerPowBytes.Length);
-                    w.Write(signerPowBytes);
-                }
-                data = mw.ToArray();
-            }
-
-            // Send this keepalive to all connected non-clients
-            CoreProtocolMessage.broadcastProtocolMessage(new char[] { 'M', 'H', 'W' }, ProtocolMessageCode.signerPow, data, address, skipEndpoint);
         }
     }
 }

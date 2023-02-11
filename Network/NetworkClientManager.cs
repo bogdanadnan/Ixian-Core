@@ -30,6 +30,8 @@ namespace IXICore.Network
         private static bool running = false;
         private static ThreadLiveCheck TLC;
 
+        private static bool paused = false;
+
         // Starts the Network Client Manager.
         // If connections_to_wait_for parameter is bigger than 0, it waits until it connects to the specified number of nodes.
         // Afterwards, it starts the reconnect and keepalive threads
@@ -55,10 +57,10 @@ namespace IXICore.Network
             // Now add the seed nodes to the list
             foreach (string[] addr in CoreNetworkUtils.getSeedNodes(IxianHandler.networkType))
             {
-                byte[] wallet_addr = null;
+                Address wallet_addr = null;
                 if(addr[1] != null)
                 {
-                    wallet_addr = Base58Check.Base58CheckEncoding.DecodePlain(addr[1]);
+                    wallet_addr = new Address(Base58Check.Base58CheckEncoding.DecodePlain(addr[1]));
                 }
                 PeerStorage.addPeerToPeerList(addr[0], wallet_addr, Clock.getTimestamp(), 0, 1, 0, false);
             }
@@ -132,8 +134,20 @@ namespace IXICore.Network
             // Force stopping of reconnect thread
             if (reconnectThread == null)
                 return;
-            reconnectThread.Abort();
+            reconnectThread.Interrupt();
+            reconnectThread.Join();
             reconnectThread = null;
+        }
+
+        public static void pause()
+        {
+            paused = true;
+            isolate();
+        }
+
+        public static void resume()
+        {
+            paused = false;
         }
 
         // Immediately disconnects all clients
@@ -169,7 +183,7 @@ namespace IXICore.Network
         }
 
         // Connects to a specified node, with the syntax host:port
-        public static bool connectTo(string host, byte[] wallet_address)
+        public static bool connectTo(string host, Address wallet_address)
         {
             if (host == null || host.Length < 3)
             {
@@ -587,16 +601,30 @@ namespace IXICore.Network
 
         private static void reconnectLoop()
         {
-            Random rnd = new Random();
-
-            while (autoReconnect)
+            try
             {
-                TLC.Report();
+                Random rnd = new Random();
 
-                reconnectClients(rnd);
+                while (autoReconnect)
+                {
+                    if (!paused)
+                    {
+                        TLC.Report();
 
-                // Wait 5 seconds before rechecking
-                Thread.Sleep(CoreConfig.networkClientReconnectInterval);
+                        reconnectClients(rnd);
+                    }
+
+                    // Wait 5 seconds before rechecking
+                    Thread.Sleep(CoreConfig.networkClientReconnectInterval);
+                }
+            }
+            catch (ThreadInterruptedException)
+            {
+
+            }
+            catch (Exception e)
+            {
+                Logging.error("ReconnectLoop exception: {0}", e);
             }
         }
 

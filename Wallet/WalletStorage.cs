@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2017-2020 Ixian OU
+﻿// Copyright (C) 2017-2022 Ixian OU
 // This file is part of Ixian Core - www.github.com/ProjectIxian/Ixian-Core
 //
 // Ixian Core is free software: you can redistribute it and/or modify
@@ -44,8 +44,8 @@ namespace IXICore
 
         protected byte[] privateKey = null;
         protected byte[] publicKey = null;
-        protected byte[] address = null;
-        protected byte[] lastAddress = null;
+        protected Address address = null;
+        protected Address lastAddress = null;
 
         protected bool walletLoaded = false;
 
@@ -56,7 +56,7 @@ namespace IXICore
             filename = file_name;
         }
 
-        public byte[] getPrimaryAddress()
+        public Address getPrimaryAddress()
         {
             return address;
         }
@@ -71,14 +71,11 @@ namespace IXICore
             return publicKey;
         }
 
-        public byte[] getLastAddress()
+        public Address getLastAddress()
         {
             // TODO TODO TODO TODO TODO improve if possible for v3 wallets
             // Also you have to take into account what happens when loading from file and the difference between v1 and v2 wallets (key related)
-            lock (myAddresses)
-            {
-                return lastAddress;
-            }
+            return lastAddress;
         }
 
         public byte[] getSeedHash()
@@ -92,18 +89,18 @@ namespace IXICore
             return filename;
         }
 
-        public IxiNumber getMyTotalBalance(byte[] primary_address)
+        public IxiNumber getMyTotalBalance(Address primary_address)
         {
             IxiNumber balance = 0;
             lock (myAddresses)
             {
                 foreach (var entry in myAddresses)
                 {
-                    if (primary_address != null && !entry.Value.keyPair.addressBytes.SequenceEqual(primary_address))
+                    if (primary_address != null && !entry.Value.keyPair.addressBytes.SequenceEqual(primary_address.addressNoChecksum))
                     {
                         continue;
                     }
-                    IxiNumber amount = IxianHandler.getWalletBalance(entry.Key);
+                    IxiNumber amount = IxianHandler.getWalletBalance(new Address(entry.Key));
                     if (amount == 0)
                     {
                         continue;
@@ -117,15 +114,19 @@ namespace IXICore
         public Address generateNewAddress(Address key_primary_address, byte[] last_nonce, bool add_to_pool = true, bool write_to_file = true)
         {
             Address new_address = null;
-            if(walletVersion < 2)
+            if (walletVersion < 2)
             {
                 new_address = generateNewAddress_v0(key_primary_address, last_nonce, add_to_pool);
             }
-            else
+            else if (walletVersion < 5)
             {
                 new_address = generateNewAddress_v1(key_primary_address, last_nonce, add_to_pool);
             }
-            if(new_address != null)
+            else
+            {
+                new_address = generateNewAddress_v5(key_primary_address, last_nonce, add_to_pool);
+            }
+            if (new_address != null)
             {
                 if (write_to_file)
                 {
@@ -135,16 +136,16 @@ namespace IXICore
             return new_address;
         }
 
-        public Address generateNewAddress_v0(Address key_primary_address, byte[] last_nonce, bool add_to_pool = true)
+        private Address generateNewAddress_v0(Address key_primary_address, byte[] last_nonce, bool add_to_pool = true)
         {
             lock (myKeys)
             {
-                if (!myKeys.ContainsKey(key_primary_address.address))
+                if (!myKeys.ContainsKey(key_primary_address.addressNoChecksum))
                 {
                     return null;
                 }
 
-                IxianKeyPair kp = myKeys[key_primary_address.address];
+                IxianKeyPair kp = myKeys[key_primary_address.addressNoChecksum];
 
                 byte[] base_nonce = baseNonce;
 
@@ -160,7 +161,7 @@ namespace IXICore
                 }
                 byte[] new_nonce_bytes = Crypto.sha512quTrunc(new_nonce.ToArray(), 0, 0, 16);
 
-                Address new_address = new Address(key_primary_address.address, new_nonce_bytes);
+                Address new_address = new Address(key_primary_address.addressNoChecksum, new_nonce_bytes);
 
                 if (add_to_pool)
                 {
@@ -168,8 +169,8 @@ namespace IXICore
                     lock (myAddresses)
                     {
                         AddressData ad = new AddressData() { nonce = kp.lastNonceBytes, keyPair = kp };
-                        myAddresses.Add(new_address.address, ad);
-                        lastAddress = new_address.address;
+                        myAddresses.Add(new_address.addressNoChecksum, ad);
+                        lastAddress = new_address;
                     }
                 }
 
@@ -177,16 +178,16 @@ namespace IXICore
             }
         }
 
-        public Address generateNewAddress_v1(Address key_primary_address, byte[] last_nonce, bool add_to_pool = true)
+        private Address generateNewAddress_v1(Address key_primary_address, byte[] last_nonce, bool add_to_pool = true)
         {
             lock (myKeys)
             {
-                if (!myKeys.ContainsKey(key_primary_address.address))
+                if (!myKeys.ContainsKey(key_primary_address.addressNoChecksum))
                 {
                     return null;
                 }
 
-                IxianKeyPair kp = myKeys[key_primary_address.address];
+                IxianKeyPair kp = myKeys[key_primary_address.addressNoChecksum];
 
                 byte[] base_nonce = baseNonce;
 
@@ -202,7 +203,7 @@ namespace IXICore
                 }
                 byte[] new_nonce_bytes = Crypto.sha512sqTrunc(new_nonce.ToArray(), 0, 0, 16);
 
-                Address new_address = new Address(key_primary_address.address, new_nonce_bytes);
+                Address new_address = new Address(key_primary_address.addressNoChecksum, new_nonce_bytes);
 
                 if (add_to_pool)
                 {
@@ -210,8 +211,50 @@ namespace IXICore
                     lock (myAddresses)
                     {
                         AddressData ad = new AddressData() { nonce = kp.lastNonceBytes, keyPair = kp };
-                        myAddresses.Add(new_address.address, ad);
-                        lastAddress = new_address.address;
+                        myAddresses.Add(new_address.addressNoChecksum, ad);
+                        lastAddress = new_address;
+                    }
+                }
+
+                return new_address;
+            }
+        }
+
+        private Address generateNewAddress_v5(Address key_primary_address, byte[] last_nonce, bool add_to_pool = true)
+        {
+            lock (myKeys)
+            {
+                if (!myKeys.ContainsKey(key_primary_address.addressNoChecksum))
+                {
+                    return null;
+                }
+
+                IxianKeyPair kp = myKeys[key_primary_address.addressNoChecksum];
+
+                byte[] base_nonce = baseNonce;
+
+                if (last_nonce == null)
+                {
+                    last_nonce = kp.lastNonceBytes;
+                }
+
+                List<byte> new_nonce = base_nonce.ToList();
+                if (last_nonce != null)
+                {
+                    new_nonce.AddRange(last_nonce);
+                }
+                byte[] new_nonce_bytes = CryptoManager.lib.sha3_512sqTrunc(new_nonce.ToArray(), 0, 0, 16);
+
+                Address new_address = new Address(key_primary_address.addressNoChecksum, new_nonce_bytes);
+
+                if (add_to_pool)
+                {
+                    kp.lastNonceBytes = new_nonce_bytes;
+                    lock (myAddresses)
+                    {
+                        AddressData ad = new AddressData() { nonce = kp.lastNonceBytes, keyPair = kp };
+                        myAddresses.Add(new_address.addressNoChecksum, ad);
+                        lastAddress = new_address;
                     }
                 }
 
@@ -253,7 +296,7 @@ namespace IXICore
             }
             Address addr = new Address(kp.publicKeyBytes);
 
-            if (addr.address == null)
+            if (addr.addressNoChecksum == null)
             {
                 Logging.error("An error occurred while generating new key pair. Unable to produce a valid address.");
                 return null;
@@ -264,17 +307,17 @@ namespace IXICore
                 {
                     if (!writeToFile)
                     {
-                        myKeys.Add(addr.address, kp);
+                        myKeys.Add(addr.addressNoChecksum, kp);
                         AddressData ad = new AddressData() { nonce = kp.lastNonceBytes, keyPair = kp };
-                        myAddresses.Add(addr.address, ad);
+                        myAddresses.Add(addr.addressNoChecksum, ad);
                     }
                     else
                     {
                         if (writeWallet(walletPassword))
                         {
-                            myKeys.Add(addr.address, kp);
+                            myKeys.Add(addr.addressNoChecksum, kp);
                             AddressData ad = new AddressData() { nonce = kp.lastNonceBytes, keyPair = kp };
-                            myAddresses.Add(addr.address, ad);
+                            myAddresses.Add(addr.addressNoChecksum, ad);
                         }
                         else
                         {
@@ -288,35 +331,35 @@ namespace IXICore
             return kp;
         }
 
-        public IxianKeyPair getKeyPair(byte[] address)
+        public IxianKeyPair getKeyPair(Address address)
         {
             lock (myKeys)
             {
-                if (myKeys.ContainsKey(address))
+                if (myKeys.ContainsKey(address.addressNoChecksum))
                 {
-                    return myKeys[address];
+                    return myKeys[address.addressNoChecksum];
                 }
                 return null;
             }
         }
 
-        public AddressData getAddress(byte[] address)
+        public AddressData getAddress(Address address)
         {
             lock (myAddresses)
             {
-                if (myAddresses.ContainsKey(address))
+                if (myAddresses.ContainsKey(address.addressNoChecksum))
                 {
-                    return myAddresses[address];
+                    return myAddresses[address.addressNoChecksum];
                 }
             }
             return null;
         }
 
-        public bool isMyAddress(byte[] address)
+        public bool isMyAddress(Address address)
         {
             lock (myAddresses)
             {
-                if (myAddresses.ContainsKey(address))
+                if (myAddresses.ContainsKey(address.addressNoChecksum))
                 {
                     return true;
                 }
@@ -324,19 +367,19 @@ namespace IXICore
             return false;
         }
 
-        public List<byte[]> extractMyAddressesFromAddressList(SortedDictionary<byte[], IxiNumber> address_list)
+        public List<byte[]> extractMyAddressesFromAddressList(IDictionary<Address, Transaction.ToEntry> address_list)
         {
             lock (myAddresses)
             {
                 List<byte[]> found_address_list = new List<byte[]>();
                 foreach (var entry in address_list)
                 {
-                    if (myAddresses.ContainsKey(entry.Key))
+                    if (myAddresses.ContainsKey(entry.Key.addressNoChecksum))
                     {
-                        found_address_list.Add(entry.Key);
+                        found_address_list.Add(entry.Key.addressNoChecksum);
                     }
                 }
-                if(found_address_list.Count > 0)
+                if (found_address_list.Count > 0)
                 {
                     return found_address_list;
                 }
@@ -360,18 +403,18 @@ namespace IXICore
             }
         }
 
-        public SortedDictionary<byte[], IxiNumber> generateFromListFromAddress(byte[] from_address, IxiNumber total_amount_with_fee, bool full_pubkey = false)
+        public SortedDictionary<byte[], IxiNumber> generateFromListFromAddress(Address from_address, IxiNumber total_amount_with_fee, bool full_pubkey = false)
         {
             lock (myAddresses)
             {
                 SortedDictionary<byte[], IxiNumber> tmp_from_list = new SortedDictionary<byte[], IxiNumber>(new ByteArrayComparer());
                 if (full_pubkey)
                 {
-                    if (!myAddresses.ContainsKey(from_address))
+                    if (!myAddresses.ContainsKey(from_address.addressNoChecksum))
                     {
                         return null;
                     }
-                    AddressData ad = myAddresses[from_address];
+                    AddressData ad = myAddresses[from_address.addressNoChecksum];
                     tmp_from_list.Add(ad.nonce, total_amount_with_fee);
                 }
                 else
@@ -382,7 +425,7 @@ namespace IXICore
             }
         }
 
-        public SortedDictionary<byte[], IxiNumber> generateFromList(byte[] primary_address, IxiNumber total_amount_with_fee, List<byte[]> skip_addresses, List<Transaction> pending_transactions)
+        public SortedDictionary<byte[], IxiNumber> generateFromList(Address primary_address, IxiNumber total_amount_with_fee, List<Address> skip_addresses, List<Transaction> pending_transactions)
         {
             // TODO TODO TODO TODO  this won't work well once wallet v3 is activated
             lock (myAddresses)
@@ -390,24 +433,24 @@ namespace IXICore
                 Dictionary<byte[], IxiNumber> tmp_from_list = new Dictionary<byte[], IxiNumber>(new ByteArrayComparer());
                 foreach (var entry in myAddresses)
                 {
-                    if(!entry.Value.keyPair.addressBytes.SequenceEqual(primary_address))
+                    if (!entry.Value.keyPair.addressBytes.SequenceEqual(primary_address.addressNoChecksum))
                     {
                         continue;
                     }
 
-                    if (skip_addresses.Contains(entry.Key, new ByteArrayComparer()))
+                    if (skip_addresses.Contains(new Address(entry.Key)))
                     {
                         continue;
                     }
 
-                    Wallet wallet = IxianHandler.getWallet(entry.Key);
-                    if(wallet.type != WalletType.Normal)
+                    Wallet wallet = IxianHandler.getWallet(new Address(entry.Key));
+                    if (wallet.type != WalletType.Normal)
                     {
                         continue;
                     }
 
                     IxiNumber amount = wallet.balance;
-                    if(amount == 0)
+                    if (amount == 0)
                     {
                         continue;
                     }
@@ -426,13 +469,13 @@ namespace IXICore
                     if (pending_transactions != null)
                     {
                         var tmp_pending_froms = pending_transactions.FindAll(x => x.fromList.ContainsKey(entry.Key));
-                        foreach(var pending_from in tmp_pending_froms)
+                        foreach (var pending_from in tmp_pending_froms)
                         {
                             balance -= pending_from.fromList[entry.Key];
                         }
                     }
 
-                    if(balance <= 0)
+                    if (balance <= 0)
                     {
                         continue;
                     }
@@ -458,9 +501,9 @@ namespace IXICore
 
         public byte[] getNonceFromAddress(byte[] address)
         {
-            foreach(var addr in myAddresses)
+            foreach (var addr in myAddresses)
             {
-                if(addr.Key.SequenceEqual(address))
+                if (addr.Key.SequenceEqual(address))
                 {
                     return addr.Value.nonce;
                 }
@@ -475,7 +518,7 @@ namespace IXICore
             if (walletVersion == 4)
             {
                 char type = reader.ReadChar();
-                if(type == 'v')
+                if (type == 'v')
                 {
                     viewingWallet = true;
                 }
@@ -525,7 +568,8 @@ namespace IXICore
                         Logging.error("Unable to decrypt wallet, an incorrect password was used.");
                         return false;
                     }
-                }else
+                }
+                else
                 {
                     private_key = CryptoManager.lib.decryptWithPassword(b_privateKey, password, false);
                     Logging.flush();
@@ -560,7 +604,7 @@ namespace IXICore
                 publicKey = public_key;
                 if (baseNonce == null)
                 {
-                    if(walletVersion < 2)
+                    if (walletVersion < 2)
                     {
                         baseNonce = Crypto.sha512quTrunc(privateKey, publicKey.Length, 64);
                     }
@@ -577,25 +621,25 @@ namespace IXICore
                 return false;
             }
 
-            Address addr = new Address(publicKey);
-            lastAddress = address = addr.address;
+            Address addr = new Address(new Address(publicKey).addressNoChecksum);
+            lastAddress = address = addr;
 
-            masterSeed = address;
-            seedHash = address;
+            masterSeed = address.addressWithChecksum;
+            seedHash = address.addressWithChecksum;
             derivedMasterSeed = masterSeed;
 
             IxianKeyPair kp = new IxianKeyPair();
             kp.privateKeyBytes = privateKey;
             kp.publicKeyBytes = publicKey;
-            kp.addressBytes = address;
+            kp.addressBytes = address.addressNoChecksum;
             lock (myKeys)
             {
-                myKeys.Add(address, kp);
+                myKeys.Add(address.addressNoChecksum, kp);
             }
             lock (myAddresses)
             {
                 AddressData ad = new AddressData() { nonce = new byte[1] { 0 }, keyPair = kp };
-                myAddresses.Add(address, ad);
+                myAddresses.Add(address.addressNoChecksum, ad);
 
                 if (last_nonce_bytes != null)
                 {
@@ -691,12 +735,12 @@ namespace IXICore
                 {
                     return false;
                 }
-                byte[] tmp_address = (new Address(dec_public_key)).address;
+                Address tmp_address = new Address(new Address(dec_public_key).addressNoChecksum);
 
                 IxianKeyPair kp = new IxianKeyPair();
                 kp.privateKeyBytes = dec_private_key;
                 kp.publicKeyBytes = dec_public_key;
-                kp.addressBytes = tmp_address;
+                kp.addressBytes = tmp_address.addressNoChecksum;
                 if (enc_nonce != null)
                 {
                     kp.lastNonceBytes = CryptoManager.lib.decryptWithPassword(enc_nonce, password, true);
@@ -722,12 +766,12 @@ namespace IXICore
 
                 lock (myKeys)
                 {
-                    myKeys.Add(tmp_address, kp);
+                    myKeys.Add(tmp_address.addressNoChecksum, kp);
                 }
                 lock (myAddresses)
                 {
                     AddressData ad = new AddressData() { nonce = new byte[1] { 0 }, keyPair = kp };
-                    myAddresses.Add(tmp_address, ad);
+                    myAddresses.Add(tmp_address.addressNoChecksum, ad);
                 }
             }
 
@@ -745,6 +789,123 @@ namespace IXICore
             return true;
         }
 
+        protected bool readWallet_v5(byte[] walletBytes, string password, bool verify_only = false)
+        {
+            byte[] lastNonce = null;
+            try
+            {
+                // Suppress decryption errors in console output
+                bool console_output = Logging.consoleOutput;
+                Logging.consoleOutput = false;
+
+                byte[] decryptedWalletBytes = CryptoManager.lib.decryptWithPassword(walletBytes, password, true);
+
+                byte[] privateKey = null;
+                byte[] baseNonce = null;
+                byte[] publicKey = null;
+                using (MemoryStream m = new MemoryStream(decryptedWalletBytes))
+                {
+                    using (BinaryReader reader = new BinaryReader(m))
+                    {
+                        char type = reader.ReadChar();
+                        if (type == 'v')
+                        {
+                            viewingWallet = true;
+                        }
+
+                        if (viewingWallet)
+                        {
+                            int baseNonceLength = reader.ReadInt32();
+                            baseNonce = reader.ReadBytes(baseNonceLength);
+                        }
+                        else
+                        {
+                            int baseNonceLength = reader.ReadInt32();
+                            baseNonce = reader.ReadBytes(baseNonceLength);
+                            int privateKeyLength = reader.ReadInt32();
+                            privateKey = reader.ReadBytes(privateKeyLength);
+                        }
+
+                        int publicKeyLength = reader.ReadInt32();
+                        publicKey = reader.ReadBytes(publicKeyLength);
+
+                        int lastNonceLength = reader.ReadInt32();
+                        if (lastNonceLength > 0)
+                        {
+                            lastNonce = reader.ReadBytes(lastNonceLength);
+                        }
+                    }
+                }
+                Logging.flush();
+                Logging.consoleOutput = console_output;
+                if (privateKey == null && baseNonce == null)
+                {
+                    Logging.error("Unable to decrypt wallet, an incorrect password was used.");
+                    return false;
+                }
+                if (baseNonce == null)
+                {
+                    baseNonce = CryptoManager.lib.sha3_512sqTrunc(privateKey);
+                }
+                if (publicKey == null)
+                {
+                    Logging.error("Unable to decrypt wallet, file is probably corrupted.");
+                    return false;
+                }
+
+                if (verify_only)
+                {
+                    return true;
+                }
+                this.baseNonce = baseNonce;
+                this.privateKey = privateKey;
+                this.publicKey = publicKey;
+                walletPassword = password;
+            }
+            catch (Exception)
+            {
+                Logging.error("Unable to decrypt wallet, an incorrect password was used.");
+                return false;
+            }
+
+            Address addr = new Address(new Address(publicKey).addressNoChecksum);
+            lastAddress = address = addr;
+
+            masterSeed = address.addressWithChecksum;
+            seedHash = address.addressWithChecksum;
+            derivedMasterSeed = masterSeed;
+
+            IxianKeyPair kp = new IxianKeyPair();
+            kp.privateKeyBytes = privateKey;
+            kp.publicKeyBytes = publicKey;
+            kp.addressBytes = address.addressNoChecksum;
+            lock (myKeys)
+            {
+                myKeys.Add(address.addressNoChecksum, kp);
+            }
+            lock (myAddresses)
+            {
+                AddressData ad = new AddressData() { nonce = new byte[1] { 0 }, keyPair = kp };
+                myAddresses.Add(address.addressNoChecksum, ad);
+
+                if (lastNonce != null)
+                {
+                    bool lastAddressFound = false;
+                    while (lastAddressFound == false)
+                    {
+                        if (kp.lastNonceBytes != null && lastNonce.SequenceEqual(kp.lastNonceBytes))
+                        {
+                            lastAddressFound = true;
+                        }
+                        else
+                        {
+                            generateNewAddress(addr, null, true, false);
+                        }
+                    }
+                }
+            }
+            return true;
+        }
         public bool walletExists()
         {
             if (File.Exists(filename))
@@ -757,7 +918,7 @@ namespace IXICore
         public void convertWalletFromIxiHex(string file_name)
         {
             string wallet_string = File.ReadAllText(file_name);
-            
+
             if (wallet_string.Take(6).SequenceEqual("IXIHEX"))
             {
                 Logging.info("Converting wallet from IXIHEX to binary");
@@ -797,6 +958,11 @@ namespace IXICore
                 else if (wallet_version == 3)
                 {
                     success = readWallet_v3(reader, password, true);
+                }
+                else if (wallet_version == 5)
+                {
+                    byte[] encryptedWalletBytes = reader.ReadBytes((int)(reader.BaseStream.Length - reader.BaseStream.Position));
+                    success = readWallet_v5(encryptedWalletBytes, password, true);
                 }
                 else
                 {
@@ -859,6 +1025,11 @@ namespace IXICore
                 {
                     success = readWallet_v3(reader, password);
                 }
+                else if (walletVersion == 5)
+                {
+                    byte[] encryptedWalletBytes = reader.ReadBytes((int)(reader.BaseStream.Length - reader.BaseStream.Position));
+                    success = readWallet_v5(encryptedWalletBytes, password);
+                }
                 else
                 {
                     Logging.error("Unknown wallet version {0}", walletVersion);
@@ -908,6 +1079,10 @@ namespace IXICore
             {
                 return writeWallet_v3(walletPassword);
             }
+            if (walletVersion == 5)
+            {
+                return writeWallet_v5(walletPassword);
+            }
             return false;
         }
 
@@ -941,7 +1116,7 @@ namespace IXICore
             {
                 // TODO Omega - automatically upgrade to wallet v4
                 writer.Write(walletVersion);
-                if(walletVersion == 4)
+                if (walletVersion == 4)
                 {
                     if (viewingWallet)
                     {
@@ -957,7 +1132,8 @@ namespace IXICore
                         writer.Write(b_privateKey.Length);
                         writer.Write(b_privateKey);
                     }
-                }else
+                }
+                else
                 {
                     writer.Write(b_privateKey.Length);
                     writer.Write(b_privateKey);
@@ -1056,6 +1232,80 @@ namespace IXICore
             return true;
         }
 
+        protected bool writeWallet_v5(string password)
+        {
+            if (password.Length < 10)
+                return false;
+
+            BinaryWriter walletFileWriter;
+            try
+            {
+                walletFileWriter = new BinaryWriter(new FileStream(filename, FileMode.Create));
+            }
+            catch (Exception e)
+            {
+                Logging.error("Cannot create wallet file. {0}", e.Message);
+                return false;
+            }
+            try
+            {
+                var encryptedWalletBytes = getWalletBytes_v5(password, viewingWallet);
+                walletFileWriter.Write(walletVersion);
+                walletFileWriter.Write(encryptedWalletBytes);
+            }
+            catch (Exception e)
+            {
+                Logging.error("Cannot write to wallet file. {0}", e.Message);
+                return false;
+            }
+            walletFileWriter.Close();
+            return true;
+        }
+
+        private byte[] getWalletBytes_v5(string password, bool viewingWallet)
+        {
+            using (MemoryStream m = new MemoryStream())
+            {
+                using (BinaryWriter writer = new BinaryWriter(m))
+                {
+                    if (viewingWallet)
+                    {
+                        writer.Write('v');
+                        // Write the base nonce
+                        writer.Write(baseNonce.Length);
+                        writer.Write(baseNonce);
+                    }
+                    else
+                    {
+                        writer.Write('f');
+                        // Write the base nonce
+                        writer.Write(baseNonce.Length);
+                        writer.Write(baseNonce);
+                        // Write the address keypair
+                        writer.Write(privateKey.Length);
+                        writer.Write(privateKey);
+                    }
+
+                    writer.Write(publicKey.Length);
+                    writer.Write(publicKey);
+
+                    var lastNonceBytes = myKeys.First().Value.lastNonceBytes;
+                    if (lastNonceBytes != null)
+                    {
+                        writer.Write(lastNonceBytes.Length);
+                        writer.Write(lastNonceBytes);
+                    }
+                    else
+                    {
+                        writer.Write(0);
+                    }
+
+                }
+
+                return CryptoManager.lib.encryptWithPassword(m.ToArray(), password, true);
+            }
+        }
+
         // Deletes the wallet file if it exists
         public bool deleteWallet()
         {
@@ -1091,7 +1341,7 @@ namespace IXICore
         // Generate a new wallet with matching private/public key pairs
         public bool generateWallet(string password)
         {
-            if(walletLoaded)
+            if (walletLoaded)
             {
                 Logging.error("Can't generate wallet, wallet already loaded.");
                 return false;
@@ -1099,13 +1349,13 @@ namespace IXICore
 
             Logging.flush();
 
-            walletVersion = 2;
+            walletVersion = 5;
             walletPassword = password;
 
             Logging.log(LogSeverity.info, "Generating primary wallet keys, this may take a while, please wait...");
 
             //IxianKeyPair kp = generateNewKeyPair(false);
-            IxianKeyPair kp = CryptoManager.lib.generateKeys(ConsensusConfig.defaultRsaKeySize);
+            IxianKeyPair kp = CryptoManager.lib.generateKeys(ConsensusConfig.defaultRsaKeySize, 1);
 
             if (kp == null)
             {
@@ -1115,32 +1365,34 @@ namespace IXICore
 
             privateKey = kp.privateKeyBytes;
             publicKey = kp.publicKeyBytes;
-            baseNonce = Crypto.sha512sqTrunc(privateKey, publicKey.Length, 64);
+            baseNonce = CryptoManager.lib.getSecureRandomBytes(64);
 
-            Address addr = new Address(publicKey);
-            lastAddress = address = addr.address;
+            Address addr = new Address(new Address(publicKey).addressNoChecksum);
+            lastAddress = address = addr;
 
-            masterSeed = address;
-            seedHash = address;
+            masterSeed = address.addressWithChecksum;
+            seedHash = address.addressWithChecksum;
             derivedMasterSeed = masterSeed;
 
-            kp.addressBytes = address;
+            kp.addressBytes = address.addressNoChecksum;
 
-            myKeys.Add(address, kp);
-            myAddresses.Add(address, new AddressData() { keyPair = kp, nonce = new byte[1] { 0 } });
+            myKeys.Add(address.addressNoChecksum, kp);
+            myAddresses.Add(address.addressNoChecksum, new AddressData() { keyPair = kp, nonce = new byte[1] { 0 } });
 
 
-            Logging.info(String.Format("Public Key: {0}", Crypto.hashToString(publicKey)));
-            Logging.info(String.Format("Public Node Address: {0}", Base58Check.Base58CheckEncoding.EncodePlain(address)));
+            Logging.info("Public Key: {0}", Crypto.hashToString(publicKey));
+            Logging.info("Public Node Address: {0}", address.ToString());
 
             // Wait for any pending log messages to be written
             Logging.flush();
 
             Console.WriteLine();
             Console.Write("Your IXIAN address is ");
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine(Base58Check.Base58CheckEncoding.EncodePlain(address));
-            Console.ResetColor();
+            if (OperatingSystem.IsWindows())
+                Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine(address.ToString());
+            if (OperatingSystem.IsWindows()) 
+                Console.ResetColor();
             Console.WriteLine();
 
             // Write the new wallet data to the file
@@ -1158,17 +1410,17 @@ namespace IXICore
         public void scanForLostAddresses()
         {
             bool new_address_found = false;
-            foreach(var key in myKeys)
+            foreach (var key in myKeys)
             {
                 Address primary_address = new Address(key.Value.addressBytes);
                 byte[] last_nonce = key.Value.lastNonceBytes;
                 for (int i = 0; i < 100; i++)
                 {
                     Address new_address = generateNewAddress(primary_address, last_nonce, false, false);
-                    if(IxianHandler.getWalletBalance(new_address.address) > 0)
+                    if (IxianHandler.getWalletBalance(new_address) > 0)
                     {
                         new_address_found = true;
-                        for(int j = 0; j <= i; j++)
+                        for (int j = 0; j <= i; j++)
                         {
                             generateNewAddress(primary_address, null, true, false);
                         }
@@ -1190,7 +1442,7 @@ namespace IXICore
 
         public byte[] getRawViewingWallet()
         {
-            if(walletVersion != 2 && walletVersion != 4)
+            if (walletVersion != 2 && walletVersion < 4)
             {
                 throw new Exception("Cannot generate raw viewing wallet for wallet version " + walletVersion + ", v2 or v4 required.");
             }
@@ -1198,41 +1450,47 @@ namespace IXICore
             if (password.Length < 10)
                 return null;
 
-            // Encrypt data first
-            byte[] b_baseNonce = CryptoManager.lib.encryptWithPassword(baseNonce, password, false);
-            byte[] b_publicKey = CryptoManager.lib.encryptWithPassword(publicKey, password, false);
-
-            using (MemoryStream m = new MemoryStream())
+            if (walletVersion == 5)
             {
-                using (BinaryWriter w = new BinaryWriter(m))
+                return getWalletBytes_v5(password, true);
+            }else
+            {
+                // Encrypt data first
+                byte[] b_baseNonce = CryptoManager.lib.encryptWithPassword(baseNonce, password, false);
+                byte[] b_publicKey = CryptoManager.lib.encryptWithPassword(publicKey, password, false);
+
+                using (MemoryStream m = new MemoryStream())
                 {
-                    try
+                    using (BinaryWriter w = new BinaryWriter(m))
                     {
-                        w.Write(4);
-                        w.Write('v');
-
-                        // Write the address keypair
-                        w.Write(b_baseNonce.Length);
-                        w.Write(b_baseNonce);
-
-                        w.Write(b_publicKey.Length);
-                        w.Write(b_publicKey);
-
-                        if (myKeys.First().Value.lastNonceBytes != null)
+                        try
                         {
-                            byte[] b_last_nonce = CryptoManager.lib.encryptWithPassword(myKeys.First().Value.lastNonceBytes, password, false);
-                            w.Write(b_last_nonce.Length);
-                            w.Write(b_last_nonce);
-                        }
+                            w.Write(4);
+                            w.Write('v');
 
+                            // Write the address keypair
+                            w.Write(b_baseNonce.Length);
+                            w.Write(b_baseNonce);
+
+                            w.Write(b_publicKey.Length);
+                            w.Write(b_publicKey);
+
+                            if (myKeys.First().Value.lastNonceBytes != null)
+                            {
+                                byte[] b_last_nonce = CryptoManager.lib.encryptWithPassword(myKeys.First().Value.lastNonceBytes, password, false);
+                                w.Write(b_last_nonce.Length);
+                                w.Write(b_last_nonce);
+                            }
+
+                        }
+                        catch (Exception e)
+                        {
+                            Logging.error("Cannot write to wallet file. {0}", e.Message);
+                            return null;
+                        }
                     }
-                    catch (Exception e)
-                    {
-                        Logging.error("Cannot write to wallet file. {0}", e.Message);
-                        return null;
-                    }
+                    return m.ToArray();
                 }
-                return m.ToArray();
             }
         }
 
@@ -1243,7 +1501,7 @@ namespace IXICore
 
         public bool isValidPassword(string password)
         {
-            if(password != null && password.Length > 0 && password == walletPassword)
+            if (password != null && password.Length > 0 && password == walletPassword)
             {
                 return true;
             }

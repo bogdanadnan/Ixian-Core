@@ -107,7 +107,8 @@ namespace IXICore.Network
             }
             continueRunning = false;
 
-            netControllerThread.Abort();
+            netControllerThread.Interrupt();
+            netControllerThread.Join();
             netControllerThread = null;
 
             // Close blocking socket
@@ -176,61 +177,73 @@ namespace IXICore.Network
 
         private static void networkOpsLoop(object data)
         {
-            if (data is NetOpsData)
+            try
             {
-                try
+                if (data is NetOpsData)
                 {
-                    NetOpsData netOpsData = (NetOpsData)data;
-                    listener = new TcpListener(netOpsData.listenAddress);
-                    listener.Start();
-                }
-                catch (Exception e)
-                {
-                    Logging.error("Exception starting server: {0}", e.ToString());
-                    return;
-                }
-            }
-            else
-            {
-                Logging.error("NetworkServer.networkOpsLoop called with incorrect data object. Expected 'NetOpsData', got '{0}'", data.GetType().ToString());
-                return;
-            }
-            // housekeeping tasks
-            while (continueRunning)
-            {
-                TLC.Report();
-                try
-                {
-                    handleDisconnectedClients();
-                }catch(Exception e)
-                {
-                    Logging.error("Fatal exception occurred in NetworkServer.networkOpsLoop: " + e);
-                }
-                // Use a blocking mechanism
-                try
-                {
-                    Socket handlerSocket = listener.AcceptSocket();
-                    acceptConnection(handlerSocket);
-                }
-                catch (SocketException)
-                {
-                    // Could be an interupt request
-                }
-                catch (Exception)
-                {
-                    if (continueRunning)
+                    try
                     {
-                        Logging.error("Exception occurred in NetworkServer while trying to accept socket connection.");
-                        restartNetworkOperations();
+                        NetOpsData netOpsData = (NetOpsData)data;
+                        listener = new TcpListener(netOpsData.listenAddress);
+                        listener.Start();
                     }
+                    catch (Exception e)
+                    {
+                        Logging.error("Exception starting server: {0}", e.ToString());
+                        return;
+                    }
+                }
+                else
+                {
+                    Logging.error("NetworkServer.networkOpsLoop called with incorrect data object. Expected 'NetOpsData', got '{0}'", data.GetType().ToString());
                     return;
                 }
+                // housekeeping tasks
+                while (continueRunning)
+                {
+                    TLC.Report();
+                    try
+                    {
+                        handleDisconnectedClients();
+                    }
+                    catch (Exception e)
+                    {
+                        Logging.error("Fatal exception occurred in NetworkServer.networkOpsLoop: " + e);
+                    }
+                    // Use a blocking mechanism
+                    try
+                    {
+                        Socket handlerSocket = listener.AcceptSocket();
+                        acceptConnection(handlerSocket);
+                    }
+                    catch (SocketException)
+                    {
+                        // Could be an interupt request
+                    }
+                    catch (Exception)
+                    {
+                        if (continueRunning)
+                        {
+                            Logging.error("Exception occurred in NetworkServer while trying to accept socket connection.");
+                            restartNetworkOperations();
+                        }
+                        return;
+                    }
 
-                // Sleep to prevent cpu usage
-                Thread.Sleep(100);
+                    // Sleep to prevent cpu usage
+                    Thread.Sleep(100);
+
+                }
+                Logging.info("Server listener thread ended.");
+            }
+            catch (ThreadInterruptedException)
+            {
 
             }
-            Logging.info("Server listener thread ended.");
+            catch (Exception e)
+            {
+                Logging.error("NetworkOpsLoop exception: {0}", e);
+            }
         }
 
         /// <summary>
@@ -347,7 +360,7 @@ namespace IXICore.Network
         /// <param name="code">Type of the network message to send</param>
         /// <param name="message">Byte-field with the required data, as specified by `code`.</param>
         /// <returns>True, if the message was delivered.</returns>
-        public static bool forwardMessage(byte[] address, ProtocolMessageCode code, byte[] message)
+        public static bool forwardMessage(Address address, ProtocolMessageCode code, byte[] message)
         {
             if (address == null)
             {
@@ -355,7 +368,7 @@ namespace IXICore.Network
                 return false;
             }
 
-            Logging.info(">>>> Preparing to forward to {0}", Base58Check.Base58CheckEncoding.EncodePlain(address));
+            Logging.info(">>>> Preparing to forward to {0}", address.ToString());
 
             QueueMessage queue_message = RemoteEndpoint.getQueueMessage(code, message, null);
             lock (connectedClients)
@@ -370,7 +383,7 @@ namespace IXICore.Network
                     if(!endpoint.isConnected())
                         continue;
 
-                    byte[] client_wallet = endpoint.presence.wallet;
+                    Address client_wallet = endpoint.presence.wallet;
 
                     if (client_wallet != null && address.SequenceEqual(client_wallet))
                     {
@@ -406,7 +419,7 @@ namespace IXICore.Network
                     if (endpoint.presence == null)
                         continue;
 
-                    byte[] client_wallet = endpoint.presence.wallet;
+                    byte[] client_wallet = endpoint.presence.wallet.addressNoChecksum;
 
                     if (client_wallet != null)
                     {

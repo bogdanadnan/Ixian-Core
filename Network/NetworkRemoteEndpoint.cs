@@ -104,7 +104,7 @@ namespace IXICore.Network
 
         private List<long> requestedMessageIds = new List<long>();
 
-        public byte[] serverWalletAddress = null;
+        public Address serverWalletAddress = null;
         public byte[] serverPubKey = null;
 
         public byte[] challenge = null;
@@ -155,6 +155,10 @@ namespace IXICore.Network
 
             remoteIP = (IPEndPoint)clientSocket.RemoteEndPoint;
             address = remoteIP.Address.ToString();
+            if (remoteIP.Address.IsIPv4MappedToIPv6 && address.StartsWith("::FFFF:", StringComparison.OrdinalIgnoreCase))
+            {
+                address = address.Substring(7);
+            }
             fullAddress = address + ":" + remoteIP.Port;
             presence = null;
             presenceAddress = null;
@@ -180,17 +184,20 @@ namespace IXICore.Network
             // Abort all related threads
             if (recvThread != null)
             {
-                recvThread.Abort();
+                recvThread.Interrupt();
+                recvThread.Join();
                 recvThread = null;
             }
             if (sendThread != null)
             {
-                sendThread.Abort();
+                sendThread.Interrupt();
+                sendThread.Join();
                 sendThread = null;
             }
             if (parseThread != null)
             {
-                parseThread.Abort();
+                parseThread.Interrupt();
+                parseThread.Join();
                 parseThread = null;
             }
 
@@ -284,88 +291,102 @@ namespace IXICore.Network
         // Receive thread
         protected virtual void recvLoop()
         {
-            Thread.CurrentThread.IsBackground = true;
-            socketReadBuffer = new byte[8192];
-            long lastReceivedMessageStatTime = Clock.getTimestampMillis();
-            int messageCount = 0;
-            while (running)
+            try
             {
-                TLC.Report();
-                // Let the protocol handler receive and handle messages
-                bool message_received = false;
-                try
+                Thread.CurrentThread.IsBackground = true;
+                socketReadBuffer = new byte[8192];
+                long lastReceivedMessageStatTime = Clock.getTimestampMillis();
+                int messageCount = 0;
+                while (running)
                 {
-                    QueueMessageRaw? raw_msg = readSocketData();
-                    if (raw_msg != null)
+                    TLC.Report();
+                    // Let the protocol handler receive and handle messages
+                    bool message_received = false;
+                    try
                     {
-                        message_received = true;
-                        parseDataInternal((QueueMessageRaw)raw_msg);
-                        messageCount++;
-                    }
-                }
-                catch(SocketException se)
-                {
-                    if (running)
-                    {
-                        if(se.SocketErrorCode != SocketError.ConnectionAborted
-                            && se.SocketErrorCode != SocketError.NotConnected
-                            && se.SocketErrorCode != SocketError.ConnectionReset
-                            && se.SocketErrorCode != SocketError.Interrupted)
+                        QueueMessageRaw? raw_msg = readSocketData();
+                        if (raw_msg != null)
                         {
-                            Logging.warn("recvRE: Disconnected client {0} with socket exception {1} {2} {3}", getFullAddress(), se.SocketErrorCode, se.ErrorCode, se);
+                            message_received = true;
+                            parseDataInternal((QueueMessageRaw)raw_msg);
+                            messageCount++;
                         }
                     }
-                    state = RemoteEndpointState.Closed;
-                }catch(ThreadAbortException)
-                {
-                    state = RemoteEndpointState.Closed;
-                }
-                catch (Exception e)
-                {
-                    if(running)
+                    catch (SocketException se)
                     {
-                        Logging.warn("recvRE: Disconnected client {0} with exception {1}", getFullAddress(), e);
+                        if (running)
+                        {
+                            if (se.SocketErrorCode != SocketError.ConnectionAborted
+                                && se.SocketErrorCode != SocketError.NotConnected
+                                && se.SocketErrorCode != SocketError.ConnectionReset
+                                && se.SocketErrorCode != SocketError.Interrupted)
+                            {
+                                Logging.warn("recvRE: Disconnected client {0} with socket exception {1} {2} {3}", getFullAddress(), se.SocketErrorCode, se.ErrorCode, se);
+                            }
+                        }
+                        state = RemoteEndpointState.Closed;
                     }
-                    state = RemoteEndpointState.Closed;
-                }
+                    catch (ThreadAbortException)
+                    {
+                        state = RemoteEndpointState.Closed;
+                    }
+                    catch (Exception e)
+                    {
+                        if (running)
+                        {
+                            Logging.warn("recvRE: Disconnected client {0} with exception {1}", getFullAddress(), e);
+                        }
+                        state = RemoteEndpointState.Closed;
+                    }
 
-                // Check if the client disconnected
-                if (state == RemoteEndpointState.Closed)
-                {
-                    running = false;
-                    break;
-                }
-                    
-                // Sleep a while to throttle the client
-                // Check if there are too many messages
-                // TODO TODO TODO this can be handled way better
-                int total_message_count = NetworkQueue.getQueuedMessageCount();
-                if (total_message_count > 10000)
-                {
-                    Thread.Sleep(1000);
-                }
-                else if (total_message_count > 5000)
-                {
-                    Thread.Sleep(500);
-                }
-                else if(messageCount > 100)
-                {
-                    long cur_time = Clock.getTimestampMillis();
-                    long time_diff = cur_time - lastReceivedMessageStatTime;
-                    if (time_diff < 100)
+                    // Check if the client disconnected
+                    if (state == RemoteEndpointState.Closed)
                     {
-                        // sleep to throttle the client to 1000 messages/second
-                        Thread.Sleep(100 - (int)time_diff);
-                        cur_time = Clock.getTimestampMillis();
+                        running = false;
+                        break;
                     }
-                    lastReceivedMessageStatTime = cur_time;
-                    messageCount = 0;
-                }
-                else if(!message_received)
-                {
-                    Thread.Sleep(10);
+
+                    // Sleep a while to throttle the client
+                    // Check if there are too many messages
+                    // TODO TODO TODO this can be handled way better
+                    int total_message_count = NetworkQueue.getQueuedMessageCount();
+                    if (total_message_count > 10000)
+                    {
+                        Thread.Sleep(1000);
+                    }
+                    else if (total_message_count > 5000)
+                    {
+                        Thread.Sleep(500);
+                    }
+                    else if (messageCount > 100)
+                    {
+                        long cur_time = Clock.getTimestampMillis();
+                        long time_diff = cur_time - lastReceivedMessageStatTime;
+                        if (time_diff < 100)
+                        {
+                            // sleep to throttle the client to 1000 messages/second
+                            Thread.Sleep(100 - (int)time_diff);
+                            cur_time = Clock.getTimestampMillis();
+                        }
+                        lastReceivedMessageStatTime = cur_time;
+                        messageCount = 0;
+                    }
+                    else if (!message_received)
+                    {
+                        Thread.Sleep(10);
+                    }
                 }
             }
+            catch (ThreadInterruptedException)
+            {
+
+            }
+            catch (Exception e)
+            {
+                Logging.error("RecvLoop exception: {0}", e);
+            }
+            state = RemoteEndpointState.Closed;
+            running = false;
         }
 
         public virtual void disconnect()
@@ -416,133 +437,146 @@ namespace IXICore.Network
         // Send thread
         protected void sendLoop()
         {
-            // Prepare an special message object to use while sending, without locking up the queue messages
-            QueueMessage active_message = new QueueMessage();
-
-            if (enableSendTimeSyncMessages)
+            try
             {
-                sendTimeSyncMessages();
-            }
+                // Prepare an special message object to use while sending, without locking up the queue messages
+                QueueMessage active_message = new QueueMessage();
 
-            long lastSentMessageStatTime = Clock.getTimestampMillis();
-
-            int messageCount = 0;
-
-            lastDataReceivedTime = Clock.getTimestamp();
-            lastDataSentTime = Clock.getTimestamp();
-
-            while (running)
-            {
-                TLC.Report();
-                long curTime = Clock.getTimestamp();
-                if(helloReceived == false && curTime - connectionStartTime > 10)
+                if (enableSendTimeSyncMessages)
                 {
-                    // haven't received hello message for 10 seconds, stop running
-                    Logging.info("Node {0} hasn't received hello data from remote endpoint for over 10 seconds, disconnecting.", getFullAddress());
-                    state = RemoteEndpointState.Closed;
-                    running = false;
-                    break;
+                    sendTimeSyncMessages();
                 }
-                if (curTime - lastDataReceivedTime > CoreConfig.pingTimeout)
+
+                long lastSentMessageStatTime = Clock.getTimestampMillis();
+
+                int messageCount = 0;
+
+                lastDataReceivedTime = Clock.getTimestamp();
+                lastDataSentTime = Clock.getTimestamp();
+
+                while (running)
                 {
-                    // haven't received any data for 10 seconds, stop running
-                    Logging.warn("Node {0} hasn't received any data from remote endpoint for over {1} seconds, disconnecting.", getFullAddress(), CoreConfig.pingTimeout);
-                    state = RemoteEndpointState.Closed;
-                    running = false;
-                    break;
-                }
-                if(curTime - lastDataSentTime > CoreConfig.pongInterval)
-                {
-                    try
+                    TLC.Report();
+                    long curTime = Clock.getTimestamp();
+                    if (helloReceived == false && curTime - connectionStartTime > 10)
                     {
-                        clientSocket.Send(new byte[1] { 1 }, SocketFlags.None);
-                        lastDataSentTime = curTime;
-                        continue;
-                    }
-                    catch (Exception)
-                    {
+                        // haven't received hello message for 10 seconds, stop running
+                        Logging.info("Node {0} hasn't received hello data from remote endpoint for over 10 seconds, disconnecting.", getFullAddress());
                         state = RemoteEndpointState.Closed;
                         running = false;
                         break;
                     }
-                }
-
-                bool message_found = false;
-                lock (sendQueueMessagesHighPriority)
-                {
-                    lock (sendQueueMessagesNormalPriority)
+                    if (curTime - lastDataReceivedTime > CoreConfig.pingTimeout)
                     {
-                        if ((messageCount > 0 && messageCount % 5 == 0) || (sendQueueMessagesNormalPriority.Count == 0 && sendQueueMessagesHighPriority.Count == 0))
+                        // haven't received any data for 10 seconds, stop running
+                        Logging.warn("Node {0} hasn't received any data from remote endpoint for over {1} seconds, disconnecting.", getFullAddress(), CoreConfig.pingTimeout);
+                        state = RemoteEndpointState.Closed;
+                        running = false;
+                        break;
+                    }
+                    if (curTime - lastDataSentTime > CoreConfig.pongInterval)
+                    {
+                        try
                         {
-                            lock (sendQueueMessagesLowPriority)
+                            clientSocket.Send(new byte[1] { 1 }, SocketFlags.None);
+                            lastDataSentTime = curTime;
+                            continue;
+                        }
+                        catch (Exception)
+                        {
+                            state = RemoteEndpointState.Closed;
+                            running = false;
+                            break;
+                        }
+                    }
+
+                    bool message_found = false;
+                    lock (sendQueueMessagesHighPriority)
+                    {
+                        lock (sendQueueMessagesNormalPriority)
+                        {
+                            if ((messageCount > 0 && messageCount % 5 == 0) || (sendQueueMessagesNormalPriority.Count == 0 && sendQueueMessagesHighPriority.Count == 0))
                             {
-                                if (sendQueueMessagesLowPriority.Count > 0)
+                                lock (sendQueueMessagesLowPriority)
+                                {
+                                    if (sendQueueMessagesLowPriority.Count > 0)
+                                    {
+                                        // Pick the oldest message
+                                        active_message = sendQueueMessagesLowPriority[0];
+                                        // Remove it from the queue
+                                        sendQueueMessagesLowPriority.RemoveAt(0);
+                                        message_found = true;
+                                    }
+                                }
+                            }
+
+                            if (message_found == false && ((messageCount > 0 && messageCount % 3 == 0) || sendQueueMessagesHighPriority.Count == 0))
+                            {
+                                if (sendQueueMessagesNormalPriority.Count > 0)
                                 {
                                     // Pick the oldest message
-                                    active_message = sendQueueMessagesLowPriority[0];
+                                    active_message = sendQueueMessagesNormalPriority[0];
                                     // Remove it from the queue
-                                    sendQueueMessagesLowPriority.RemoveAt(0);
+                                    sendQueueMessagesNormalPriority.RemoveAt(0);
                                     message_found = true;
                                 }
                             }
-                        }
 
-                        if (message_found == false && ((messageCount > 0 && messageCount % 3 == 0) || sendQueueMessagesHighPriority.Count == 0))
-                        {
-                            if (sendQueueMessagesNormalPriority.Count > 0)
+                            if (message_found == false && sendQueueMessagesHighPriority.Count > 0)
                             {
                                 // Pick the oldest message
-                                active_message = sendQueueMessagesNormalPriority[0];
+                                active_message = sendQueueMessagesHighPriority[0];
                                 // Remove it from the queue
-                                sendQueueMessagesNormalPriority.RemoveAt(0);
+                                sendQueueMessagesHighPriority.RemoveAt(0);
                                 message_found = true;
                             }
                         }
+                    }
 
-                        if (message_found == false && sendQueueMessagesHighPriority.Count > 0)
+                    if (message_found)
+                    {
+                        messageCount++;
+                        // Active message set, attempt to send it
+                        sendDataInternal(active_message.code, active_message.data, active_message.checksum);
+                        if (active_message.code == ProtocolMessageCode.bye)
                         {
-                            // Pick the oldest message
-                            active_message = sendQueueMessagesHighPriority[0];
-                            // Remove it from the queue
-                            sendQueueMessagesHighPriority.RemoveAt(0);
-                            message_found = true;
+                            Thread.Sleep(500); // grace sleep to get the message through
+                            state = RemoteEndpointState.Closed;
+                            running = false;
+                            fullyStopped = true;
                         }
                     }
-                }
+                    sendInventory();
 
-                if (message_found)
-                {
-                    messageCount++;
-                    // Active message set, attempt to send it
-                    sendDataInternal(active_message.code, active_message.data, active_message.checksum);
-                    if(active_message.code == ProtocolMessageCode.bye)
+                    if (messageCount > 100)
                     {
-                        Thread.Sleep(500); // grace sleep to get the message through
-                        state = RemoteEndpointState.Closed;
-                        running = false;
-                        fullyStopped = true;
+                        long cur_time = Clock.getTimestampMillis();
+                        long time_diff = cur_time - lastSentMessageStatTime;
+                        if (time_diff < 100)
+                        {
+                            // sleep to throttle the client to 1000 messages/second
+                            Thread.Sleep(100 - (int)time_diff);
+                            cur_time = Clock.getTimestampMillis();
+                        }
+                        lastSentMessageStatTime = cur_time;
+                        messageCount = 0;
                     }
-                }
-                sendInventory();
-
-                if (messageCount > 100)
-                {
-                    long cur_time = Clock.getTimestampMillis();
-                    long time_diff = cur_time - lastSentMessageStatTime;
-                    if (time_diff < 100)
+                    else if (!message_found)
                     {
-                        // sleep to throttle the client to 1000 messages/second
-                        Thread.Sleep(100 - (int)time_diff);
-                        cur_time = Clock.getTimestampMillis();
+                        Thread.Sleep(10);
                     }
-                    lastSentMessageStatTime = cur_time;
-                    messageCount = 0;
-                }
-                else if (!message_found)
-                {
-                    Thread.Sleep(10);
                 }
             }
+            catch (ThreadInterruptedException)
+            {
+
+            }
+            catch (Exception e)
+            {
+                Logging.error("SendLoop exception: {0}", e);
+            }
+            state = RemoteEndpointState.Closed;
+            running = false;
         }
 
         public void addInventoryItem(InventoryItem item)
@@ -626,13 +660,14 @@ namespace IXICore.Network
 
                     // Active message set, add it to Network Queue
                     MessagePriority priority = MessagePriority.auto;
-                    lock(requestedMessageIds)
+                    lock (requestedMessageIds)
                     {
                         long msg_id = 0;
                         ulong last_bh = IxianHandler.getLastBlockHeight();
                         switch (active_message.code)
                         {
                             case ProtocolMessageCode.blockData:
+                            case ProtocolMessageCode.blockData2:
                                 int ver = (int)active_message.data.GetIxiVarInt(0).num;
                                 if (ver <= BlockVer.v7)
                                 {
@@ -661,6 +696,7 @@ namespace IXICore.Network
                                 break;
 
                             case ProtocolMessageCode.transactionsChunk2:
+                            case ProtocolMessageCode.transactionsChunk3:
                                 if (msg_id == (long)last_bh + 1)
                                 {
                                     priority = MessagePriority.medium;
@@ -686,6 +722,11 @@ namespace IXICore.Network
                         }
                     }
                     CoreProtocolMessage.readProtocolMessage(active_message, priority, this);
+                }
+                catch (ThreadInterruptedException)
+                {
+                    state = RemoteEndpointState.Closed;
+                    running = false;
                 }
                 catch (ThreadAbortException)
                 {
@@ -888,8 +929,10 @@ namespace IXICore.Network
 
                 case ProtocolMessageCode.transactionsChunk:
                 case ProtocolMessageCode.transactionsChunk2:
+                case ProtocolMessageCode.transactionsChunk3:
                 case ProtocolMessageCode.blockTransactionsChunk:
                 case ProtocolMessageCode.transactionData:
+                case ProtocolMessageCode.transactionData2:
                     lock (sendQueueMessagesLowPriority)
                     {
                         addMessageToSendQueue(sendQueueMessagesLowPriority, message);

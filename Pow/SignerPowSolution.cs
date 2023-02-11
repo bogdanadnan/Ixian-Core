@@ -12,46 +12,106 @@
 
 using IXICore.Meta;
 using IXICore.Utils;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Converters;
 using System;
 using System.IO;
-using System.Runtime.InteropServices;
 
 namespace IXICore
 {
+    public class IxiNumberConverter : JsonConverter<IxiNumber>
+    {
+        public override void WriteJson(JsonWriter writer, IxiNumber value, JsonSerializer serializer)
+        {
+            writer.WriteValue(value.ToString());
+        }
+
+        public override IxiNumber ReadJson(JsonReader reader, Type objectType, IxiNumber existingValue, bool hasExistingValue, JsonSerializer serializer)
+        {
+            string s = (string)reader.Value;
+
+            return new IxiNumber(s);
+        }
+    }
+
     public class SignerPowSolution
     {
-        [ThreadStatic] private static byte[] dummyExpandedNonce = null;
+        public static readonly ulong maxTargetBits = 0x39FFFFFFFFFFFFFF; // Highest possible value for target bits with 64 byte hashes -> lowest difficulty
+        private static readonly IxiNumber maxTargetHash = new IxiNumber(Crypto.stringToHash("000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000FFFFFFFFFFFFFF00"));
 
-        public int version = 1;
         public ulong blockNum;
         public byte[] solution;
-        public byte[] signature;
-        public byte[] checksum; // checksum is not trasmitted over the network
-        public ulong difficulty; // difficulty is not transmitted over the network
+        public byte[] signingPubKey;
+        public IxianKeyPair keyPair { private get; set; } // keyPair is not trasmitted over the network
 
-        public SignerPowSolution()
+        private Address recipientAddress = null; // solverAddress is not trasmitted over the network
+        private byte[] _checksum = null;
+        public byte[] checksum { get {
+                if(_checksum == null)
+                {
+                    var targetHeader = IxianHandler.getBlockHeader(blockNum);
+                    _checksum = solutionToHash(solution, blockNum, targetHeader.blockChecksum, recipientAddress, signingPubKey);
+                }
+                return _checksum;
+            } } // checksum is not trasmitted over the network
+
+        private IxiNumber _difficulty = 0;
+
+        [JsonConverter(typeof(IxiNumberConverter))]
+        public IxiNumber difficulty
         {
+            get
+            {
+                if (_difficulty == 0)
+                {
+                    _difficulty = hashToDifficulty(checksum);
+                }
+                return _difficulty;
+            }
+        }  // difficulty is not transmitted over the network
 
+        private ulong _bits = 0;
+        public ulong bits
+        {
+            get
+            {
+                if (_bits == 0)
+                {
+                    _bits = hashToBits(checksum);
+                }
+                return _bits;
+            }
+        }  // bits are not transmitted over the network
+
+        public SignerPowSolution(Address recipientAddress)
+        {
+            this.recipientAddress = recipientAddress;
         }
 
         public SignerPowSolution(SignerPowSolution src)
         {
-            version = src.version;
             blockNum = src.blockNum;
 
             solution = new byte[src.solution.Length];
             Array.Copy(src.solution, solution, solution.Length);
 
-            signature = new byte[src.signature.Length];
-            Array.Copy(src.signature, signature, signature.Length);
+            byte[] signingPubKeyBytes = new byte[src.signingPubKey.Length];
+            Array.Copy(src.signingPubKey, signingPubKeyBytes, signingPubKeyBytes.Length);
+            signingPubKey = signingPubKeyBytes;
 
-            checksum = new byte[src.checksum.Length];
-            Array.Copy(src.checksum, checksum, checksum.Length);
+            byte[] recipientAddressBytes = new byte[src.recipientAddress.addressNoChecksum.Length];
+            Array.Copy(src.recipientAddress.addressNoChecksum, recipientAddressBytes, recipientAddressBytes.Length);
+            recipientAddress = new Address(recipientAddressBytes);
 
-            difficulty = src.difficulty;
+            keyPair = src.keyPair;
         }
 
-        public SignerPowSolution(byte[] bytes)
+        public byte[] sign(byte[] bytesToSign)
+        {
+            return CryptoManager.lib.getSignature(CryptoManager.lib.sha3_512sq(bytesToSign), keyPair.privateKeyBytes);
+        }
+
+        public SignerPowSolution(byte[] bytes, Address recipientAddress)
         {
             try
             {
@@ -59,18 +119,15 @@ namespace IXICore
                 {
                     using (BinaryReader reader = new BinaryReader(m))
                     {
-                        version = (int)reader.ReadIxiVarInt();
-
                         blockNum = reader.ReadIxiVarUInt();
 
                         int solutionLen = (int)reader.ReadIxiVarUInt();
                         solution = reader.ReadBytes(solutionLen);
 
-                        if (m.Position < m.Length)
-                        {
-                            int sigLen = (int)reader.ReadIxiVarUInt();
-                            signature = reader.ReadBytes(sigLen);
-                        }
+                        int signingPubKeyLen = (int)reader.ReadIxiVarUInt();
+                        signingPubKey = reader.ReadBytes(signingPubKeyLen);
+
+                        this.recipientAddress = recipientAddress;
                     }
                 }
             }
@@ -80,26 +137,29 @@ namespace IXICore
                 throw;
             }
         }
+
         // TODO Omega a blockHash should be included so that clients can verify PoW
-        public byte[] getBytes(bool includeSig)
+        public byte[] getBytes(bool compacted = false)
         {
             using (MemoryStream m = new MemoryStream(640))
             {
                 using (BinaryWriter writer = new BinaryWriter(m))
                 {
-                    writer.WriteIxiVarInt(version);
-
                     writer.WriteIxiVarInt(blockNum);
 
                     writer.WriteIxiVarInt(solution.Length);
                     writer.Write(solution);
 
-                    if(includeSig)
+                    byte[] pubKey = signingPubKey;
+                    if (compacted)
                     {
-                        writer.WriteIxiVarInt(signature.Length);
-                        writer.Write(signature);
+                        if (signingPubKey.Length > 64)
+                        {
+                            pubKey = CryptoManager.lib.sha3_512sq(signingPubKey);
+                        }
                     }
-
+                    writer.WriteIxiVarInt(pubKey.Length);
+                    writer.Write(pubKey);
 #if TRACE_MEMSTREAM_SIZES
                     Logging.info(String.Format("SignerPowSolution::getBytes: {0}", m.Length));
 #endif
@@ -110,103 +170,103 @@ namespace IXICore
         }
 
 
-        public void calculateChecksum()
+        public static byte[] bitsToHash(ulong bits)
         {
-            if (checksum != null)
+            if (bits > maxTargetBits)
             {
-                return;
+                throw new ArgumentOutOfRangeException(String.Format("bits can't be higher than minTargetBits: {0} < {1}", bits, maxTargetBits));
             }
+            byte[] targetBytes = BitConverter.GetBytes(bits);
+            int firstPos = targetBytes[7];
 
-            checksum = Crypto.sha512sqTrunc(getBytes(false));
-        }
-
-        public void sign(byte[] privateKey)
-        {
-            if(signature != null)
-            {
-                return;
-            }
-            calculateChecksum();
-
-            signature = CryptoManager.lib.getSignature(checksum, privateKey);
-        }
-
-        public bool verifySignature(byte[] pubKey)
-        {
-            if (signature == null)
-            {
-                return false;
-            }
-            calculateChecksum();
-            // Verify the signature
-            if (CryptoManager.lib.verifySignature(checksum, pubKey, signature) == false)
-            {
-                return false;
-            }
-            return true;
-        }
-
-
-        // Expand a provided nonce up to expand_length bytes by repeating the provided nonce
-        public static byte[] expandNonce(byte[] nonce, int expandLength)
-        {
-            if (dummyExpandedNonce == null)
-            {
-                dummyExpandedNonce = new byte[expandLength];
-            }
-
-            int nonceLength = nonce.Length;
-            int dummyExpandedNonceLength = dummyExpandedNonce.Length;
-
-            // set dummy with nonce
-            for (int i = 0; i < dummyExpandedNonceLength; i++)
-            {
-                dummyExpandedNonce[i] = nonce[i % nonceLength];
-            }
-
-            return dummyExpandedNonce;
-        }
-
-
-        // block hash = 44 bytes
-        // FFFF FFFF FFFF FFFF FFFF FFFF FFFF FFFF FFFF FFFF FFFF FFFF FFFF FFFF FFFF FFFF FFFF FFFF FFFF FFFF FFFF FFFF
-        // difficulty 8 bytes - first byte number of bytes, other 7 bytes should contain MSB
-        public static byte[] difficultyToHash(ulong target, int hashLength = 44)
-        {
-            byte[] targetBytes = BitConverter.GetBytes(target);
-            int targetLen = targetBytes[7];
-            byte[] hash = new byte[hashLength];
-            for (int i = 0; i < 7; i++)
-            {
-                hash[targetLen + i] = targetBytes[6 - i];
-            }
+            byte[] hash = new byte[firstPos + 8];
+            Array.Copy(targetBytes, 0, hash, firstPos, 7);
             return hash;
         }
 
-        public static ulong hashToDifficulty(byte[] hashBytes)
+        public static ulong hashToBits(byte[] hashBytes)
         {
             int len = hashBytes.Length;
-            int i = 0;
-            while (i < len - 7)
+            if (len < 8)
             {
-                if (hashBytes[i] != 0)
+                byte[] tmpHash = new byte[8];
+                Array.Copy(hashBytes, tmpHash, len);
+                hashBytes = tmpHash;
+                len = tmpHash.Length;
+            }
+
+            int zeroes = 0;
+            while (zeroes < len - 7)
+            {
+                if (hashBytes[len - 1 - zeroes] != 0)
                 {
                     break;
                 }
-                i++;
+                zeroes++;
             }
+            int firstPos = len - zeroes - 7;
+
             byte[] targetBytes = new byte[8];
-            for(int j = 0; j < 7; j++)
-            {
-                targetBytes[6 - j] = hashBytes[i + j];
-            }
-            targetBytes[7] = (byte)(i);
+            Array.Copy(hashBytes, firstPos, targetBytes, 0, 7);
+            targetBytes[7] = (byte)firstPos;
+
             return BitConverter.ToUInt64(targetBytes, 0);
         }
 
-        public static bool validateHash(byte[] hash, ulong expectedDifficulty)
+        // Returns hash in Little Endian
+        public static byte[] difficultyToHash(IxiNumber difficulty)
         {
-            if(hashToDifficulty(hash) >= expectedDifficulty)
+            if (difficulty < 0)
+            {
+                throw new ArgumentOutOfRangeException(String.Format("Difficulty can't be negative: {0}", difficulty));
+            }
+            if (difficulty.getAmount() < 1)
+            {
+                difficulty = new IxiNumber(new System.Numerics.BigInteger(1));
+            }
+            IxiNumber biHash = maxTargetHash / difficulty;
+            return biHash.getBytes();
+        }
+
+        // Accepts hash in little endian
+        public static IxiNumber hashToDifficulty(byte[] hashBytes)
+        {
+            IxiNumber biHashBytes = new IxiNumber(hashBytes);
+            if (biHashBytes < 0)
+            {
+                return 0;
+            }
+            if (biHashBytes > maxTargetHash)
+            {
+                throw new OverflowException("Hash too large");
+            }
+            IxiNumber difficulty = maxTargetHash / biHashBytes;
+            return difficulty;
+        }
+
+        public static ulong difficultyToBits(IxiNumber difficulty)
+        {
+            return hashToBits(difficultyToHash(difficulty));
+        }
+
+        public static IxiNumber bitsToDifficulty(ulong bits)
+        {
+            byte[] hash = bitsToHash(bits);
+            return hashToDifficulty(hash);
+        }
+
+        public bool verifySolution(IxiNumber minimumDifficulty)
+        {
+            if(difficulty >= minimumDifficulty)
+            {
+                return true;
+            }
+            return false;
+        }
+
+        public static bool validateHash(byte[] hash, IxiNumber minimumDifficulty)
+        {
+            if(hashToDifficulty(hash) >= minimumDifficulty)
             {
                 return true;
             }
@@ -214,9 +274,9 @@ namespace IXICore
         }
 
         // Verify nonce
-        public static bool verifyNonce(byte[] nonce, byte[] blockHash, byte[] solverAddress, ulong difficulty)
+        public static bool verifySolution(byte[] solution, ulong blockNum, byte[] blockHash, Address recipientAddress, byte[] signingPubKey, IxiNumber difficulty)
         {
-            byte[] hash = nonceToHash(nonce, blockHash, solverAddress);
+            byte[] hash = solutionToHash(solution, blockNum, blockHash, recipientAddress, signingPubKey);
             if(hash == null)
             {
                 return false;
@@ -231,24 +291,30 @@ namespace IXICore
             return false;
         }
 
-        public static byte[] nonceToHash(byte[] nonce, byte[] blockHash, byte[] solverAddress)
+        public static byte[] solutionToHash(byte[] solution, ulong blockNum, byte[] blockHash, Address recipientAddress, byte[] signingPubKey)
         {
-            if (nonce == null || nonce.Length < 1 || nonce.Length > 128)
+            if (solution == null || solution.Length < 1 || solution.Length > 64)
             {
                 return null;
             }
 
+            byte[] signingPubKeyHash = signingPubKey;
+            if(signingPubKey.Length > 64)
+            {
+                signingPubKeyHash = CryptoManager.lib.sha3_512sq(signingPubKey);
+            }
+
             // TODO protect against spamming with invalid nonce/block_num
-            byte[] p1 = new byte[blockHash.Length + solverAddress.Length];
-            System.Buffer.BlockCopy(blockHash, 0, p1, 0, blockHash.Length);
-            System.Buffer.BlockCopy(solverAddress, 0, p1, blockHash.Length, solverAddress.Length);
+            byte[] blockNumBytes = blockNum.GetIxiVarIntBytes();
+            byte[] challengeData = new byte[blockNumBytes.Length + blockHash.Length + recipientAddress.addressNoChecksum.Length + signingPubKeyHash.Length + solution.Length];
+            
+            System.Buffer.BlockCopy(blockNumBytes, 0, challengeData, 0, blockNumBytes.Length);
+            System.Buffer.BlockCopy(blockHash, 0, challengeData, blockNumBytes.Length, blockHash.Length);
+            System.Buffer.BlockCopy(recipientAddress.addressNoChecksum, 0, challengeData, blockNumBytes.Length + blockHash.Length, recipientAddress.addressNoChecksum.Length);
+            System.Buffer.BlockCopy(signingPubKeyHash, 0, challengeData, blockNumBytes.Length + blockHash.Length + recipientAddress.addressNoChecksum.Length, signingPubKeyHash.Length);
+            System.Buffer.BlockCopy(solution, 0, challengeData, blockNumBytes.Length + blockHash.Length + recipientAddress.addressNoChecksum.Length + signingPubKeyHash.Length, solution.Length);
 
-            byte[] fullnonce = expandNonce(nonce, 234234);
-            byte[] hash = Argon2id.getHash(p1, fullnonce, 2, 2048, 2);
-
-            return hash;
+            return CryptoManager.lib.sha3_512sq(challengeData);
         }
-
-        
     }
 }

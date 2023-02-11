@@ -119,7 +119,7 @@ namespace IXICore.CryptoKey
             pubKey.AddRange(BitConverter.GetBytes(rsaParams.Exponent.Length));
             pubKey.AddRange(rsaParams.Exponent);
             kp.publicKeyBytes = pubKey.ToArray();
-            kp.addressBytes = (new Address(kp.publicKeyBytes)).address;
+            kp.addressBytes = (new Address(kp.publicKeyBytes)).addressNoChecksum;
 
             List<byte> privKey = new List<byte>();
             privKey.AddRange(BitConverter.GetBytes(rsaParams.Modulus.Length));
@@ -163,7 +163,7 @@ namespace IXICore.CryptoKey
             Marshal.Copy(rsa_key.data, returned_key, 0, (int)rsa_key.len);
             Marshal.FreeHGlobal(c_entropy);
             ix_free_key(c_rsa_key);
-            //Console.WriteLine(String.Format("Duration: {0} ms.", (DateTime.Now - start).TotalMilliseconds));
+            //Logging.info(String.Format("Duration: {0} ms.", (DateTime.Now - start).TotalMilliseconds));
             //
             // returned_key is in pkcs #1 format
             return buildIxianKeyPair(returned_key);            

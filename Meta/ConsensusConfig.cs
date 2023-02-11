@@ -10,6 +10,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 // MIT License for more details.
 
+using IXICore.Meta;
 using System.Numerics;
 using System.Text;
 
@@ -69,10 +70,14 @@ namespace IXICore
         ///  The redacted window, together with the block generation inverval specify that blocks should be kept for approximately 7 days.
         /// </remarks>
         private static readonly ulong minRedactedWindowSize_v2 = 20000;
+        /// <remarks>
+        ///  The redacted window, together with the block generation inverval specify that blocks should be kept for approximately 3-4 days.
+        /// </remarks>
+        private static readonly ulong minRedactedWindowSize_v10 = 10000;
         /// <summary>
         /// Nonexistant wallet address which is used in the 'from' fields for PoW and PoS transactions, where currency is generated "from nothing".
         /// </summary>
-        public static readonly byte[] ixianInfiniMineAddress = Base58Check.Base58CheckEncoding.DecodePlain("1ixianinfinimine234234234234234234234234234242HP");
+        public static readonly Address ixianInfiniMineAddress = new Address(Base58Check.Base58CheckEncoding.DecodePlain("1ixianinfinimine234234234234234234234234234242HP"));
         /// <summary>
         /// Default security (in bits) of the generated RSA wallet keys.
         /// </summary>
@@ -92,20 +97,59 @@ namespace IXICore
         /// Amount of signatures (ratio) of consenting signatures vs. available Master Nodes before a block can be accepted.
         /// </summary>
         public static readonly double networkConsensusRatio = 0.75;
+        public static readonly int networkConsensusRatioNew = 75;
 
         /// <summary>
         /// Maximum allowed signers on a single block.
         /// </summary>
-        public static readonly int maximumBlockSigners = 1000;
+        public static readonly int maximumBlockSigners = 1000; // TODO TODO Omega - discard sigs that have lower difficulty than the new sig, when it is received
+
+        public static readonly IxiNumber minBlockSignerPowDifficulty = 10000000;
 
         /// <summary>
         /// Minimum funds a wallet must have before it is allowed to participate in the block consensus algorithm. (used in DLT Node executable).
         /// </summary>
-        public static readonly IxiNumber minimumMasterNodeFunds = new IxiNumber("2000");
+        public static readonly IxiNumber minimumMasterNodeFunds = new IxiNumber("0");
         /// <summary>
-        /// Transaction fee per kilobyte. Total transaction size is used. (Used in DLT Node executable.)
+        /// Transaction fee per kilobyte. Total transaction size is used. (Used in DLT Node executable.) 
         /// </summary>
-        public static readonly IxiNumber transactionPrice = new IxiNumber("0.00005000");
+        private static IxiNumber _forceTransactionPrice = new IxiNumber("0.00500000");
+        public static IxiNumber forceTransactionPrice
+        {
+            get
+            {
+                if(_forceTransactionPrice != 0)
+                {
+                    return _forceTransactionPrice;
+                }
+                return transactionPrice;
+            }
+
+            set
+            {
+                _forceTransactionPrice = value;
+            }
+        }
+
+        public static IxiNumber transactionPrice
+        {
+            get
+            {
+                // TODO Omega this has to be configurable; needs modifications to the mempool
+                int lastBlockVersion = IxianHandler.getLastBlockVersion();
+                if (lastBlockVersion == -1 || lastBlockVersion >= BlockVer.v10)
+                {
+                    return new IxiNumber("0.00500000");
+                }
+                return new IxiNumber("0.00005000");
+            }
+        }
+
+        /// <summary>
+        /// Transaction Dust Limit. Recipient value cannot be lower than this number.
+        /// </summary>
+        /// TODO Omega this has to be configurable; needs modifications to the mempool
+        public static readonly IxiNumber transactionDustLimit = new IxiNumber("0.01000000");
         /// <summary>
         /// Amount of transaction fees, in percent, that are deposited into the foundation wallet, which funds the development of Ixian technology. (Used in DLT Node executable.)
         /// </summary>
@@ -113,7 +157,7 @@ namespace IXICore
         /// <summary>
         /// Address of the Ixian foundation wallet, which is used to fund development of the Ixian technology stack. (Used in DLT Node executable.)
         /// </summary>
-        public static readonly byte[] foundationAddress = Base58Check.Base58CheckEncoding.DecodePlain("153xXfVi1sznPcRqJur8tutgrZecNVYGSzetp47bQvRfNuDix"); // Foundation wallet address
+        public static readonly Address foundationAddress = new Address(Base58Check.Base58CheckEncoding.DecodePlain("153xXfVi1sznPcRqJur8tutgrZecNVYGSzetp47bQvRfNuDix")); // Foundation wallet address
         /// <summary>
         /// Initial price for relaying a kilobyte of data through an S2 node. (Used in S2 Node executable.)
         /// </summary>
@@ -122,7 +166,10 @@ namespace IXICore
         /// Maximum number of transactions in each block that the node will accept. (Used in DLT Node executable.)
         /// </summary>
         public static readonly ulong maximumTransactionsPerBlock = 70200;
-
+        /// <summary>
+        /// Maximum block size in bytes. (Used in DLT Node executable.)
+        /// </summary>
+        public static readonly long maximumBlockSize = 1024000 + (((long)maximumTransactionsPerBlock + 1) * 100); // TODO fine-tune this
         /// <summary>
         /// Initial value for seeding the Transaction SHA512 checksum generator.
         /// </summary>
@@ -152,12 +199,18 @@ namespace IXICore
         /// <summary>
         /// Min. number of seconds that the PL PoW will be calculated for.
         /// </summary>
-        public static readonly long plPowMinCalculationTime = 600; // 600 seconds = 10 mins
+        public static readonly ulong plPowMinCalculationBlockTime = 20; // 20 blocks = 10 mins
+        public static readonly long plPowMinCalculationTime = (long)plPowMinCalculationBlockTime * blockGenerationInterval;
 
         /// <summary>
         /// Number of blocks after how many to re-calculate the PL PoW since last solution.
         /// </summary>
         public static readonly ulong plPowCalculationInterval = 40; // 40 blocks = approx. 20 mins
+
+        /// <summary>
+        /// Number of blocks after how many the signing and mining rewards become available for spending.
+        /// </summary>
+        public static readonly ulong rewardMaturity = 960;// plPowBlocksValidity * 8;
 
         /// <summary>
         ///  Retrieves the lenght of the redacted window based on the block version in use.
@@ -174,9 +227,13 @@ namespace IXICore
             {
                 return minRedactedWindowSize_v0;
             }
-            if (block_version >= 2)
+            if (block_version < BlockVer.v10)
             {
                 return minRedactedWindowSize_v2;
+            }
+            if (block_version >= BlockVer.v10)
+            {
+                return minRedactedWindowSize_v10;
             }
             return minRedactedWindowSize;
         }
@@ -215,7 +272,7 @@ namespace IXICore
                 pow_reward = 576;
                 pow_reward *= 100000000;
             }
-            else if (blockNum < 105120000) // final reward
+            else if (blockNum < miningExpirationBlockHeight) // final reward
             {
                 pow_reward = 18;
                 pow_reward *= 100000000;
@@ -237,7 +294,7 @@ namespace IXICore
             {
                 reward = current_supply * new IxiNumber("0.1") / new IxiNumber("100000000"); // approximation of 2*60*24*365*100
             }
-            else if(target_block_num < 1802000)
+            else if (target_block_num < 1802000)
             {
                 reward = current_supply * new IxiNumber("5") / new IxiNumber("100000000"); // approximation of 2*60*24*365*100
             }
@@ -249,14 +306,15 @@ namespace IXICore
             {
                 reward = 288;
             }
-            else if(target_block_num < 12614400)
+            else if (target_block_num < 12614400)
             {
                 reward = 144;
             }
             else if (target_block_num < 15768000)
             {
                 reward = 72;
-            }else
+            }
+            else
             {
                 reward = 36; // 36 per block after block num > 15768000 (12 years)
             }

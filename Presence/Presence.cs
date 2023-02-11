@@ -21,8 +21,8 @@ namespace IXICore
     // The actual presence object, which can contain multiple PresenceAddress objects
     public class Presence
     {
-        public int version = 0;
-        public byte[] wallet;
+        public int version = 1;
+        public Address wallet;
         public byte[] pubkey;
         public byte[] metadata; 
         public List<PresenceAddress> addresses;
@@ -36,7 +36,7 @@ namespace IXICore
             addresses = new List<PresenceAddress> { };
         }
 
-        public Presence(byte[] wallet_address, byte[] node_pubkey, byte[] node_meta, PresenceAddress node_address)
+        public Presence(Address wallet_address, byte[] node_pubkey, byte[] node_meta, PresenceAddress node_address)
         {
             wallet = wallet_address;
             pubkey = node_pubkey;
@@ -74,7 +74,7 @@ namespace IXICore
                             int walletLen = reader.ReadInt32();
                             if (walletLen > 0)
                             {
-                                wallet = reader.ReadBytes(walletLen);
+                                wallet = new Address(reader.ReadBytes(walletLen));
                             }
                             int pubkeyLen = reader.ReadInt32();
                             if (pubkeyLen > 0)
@@ -108,7 +108,7 @@ namespace IXICore
                                 int powLen = (int)reader.ReadIxiVarUInt();
                                 if (powLen > 0)
                                 {
-                                    powSolution = new SignerPowSolution(reader.ReadBytes(powLen));
+                                    powSolution = new SignerPowSolution(reader.ReadBytes(powLen), wallet);
                                 }
                             }
                         }
@@ -119,7 +119,7 @@ namespace IXICore
                             int walletLen = (int)reader.ReadIxiVarUInt();
                             if (walletLen > 0)
                             {
-                                wallet = reader.ReadBytes(walletLen);
+                                wallet = new Address(reader.ReadBytes(walletLen));
                             }
                             int pubkeyLen = (int)reader.ReadIxiVarUInt();
                             if (pubkeyLen > 0)
@@ -151,7 +151,7 @@ namespace IXICore
                             int powLen = (int)reader.ReadIxiVarUInt();
                             if (powLen > 0)
                             {
-                                powSolution = new SignerPowSolution(reader.ReadBytes(powLen));
+                                powSolution = new SignerPowSolution(reader.ReadBytes(powLen), wallet);
                             }
                         }
                     }
@@ -177,8 +177,8 @@ namespace IXICore
 
                         if (wallet != null)
                         {
-                            writer.Write(wallet.Length);
-                            writer.Write(wallet);
+                            writer.Write(wallet.addressWithChecksum.Length);
+                            writer.Write(wallet.addressWithChecksum);
                         }
                         else
                         {
@@ -237,7 +237,7 @@ namespace IXICore
 
                         if (powSolution != null)
                         {
-                            byte[] powSolutionBytes = powSolution.getBytes(true);
+                            byte[] powSolutionBytes = powSolution.getBytes();
                             writer.WriteIxiVarInt(powSolutionBytes.Length);
                             writer.Write(powSolutionBytes);
                         }
@@ -252,8 +252,8 @@ namespace IXICore
 
                         if (wallet != null)
                         {
-                            writer.WriteIxiVarInt(wallet.Length);
-                            writer.Write(wallet);
+                            writer.WriteIxiVarInt(wallet.addressNoChecksum.Length);
+                            writer.Write(wallet.addressNoChecksum);
                         }
                         else
                         {
@@ -312,7 +312,7 @@ namespace IXICore
 
                         if(powSolution != null)
                         {
-                            byte[] powSolutionBytes = powSolution.getBytes(true);
+                            byte[] powSolutionBytes = powSolution.getBytes();
                             writer.WriteIxiVarInt(powSolutionBytes.Length);
                             writer.Write(powSolutionBytes);
                         }
@@ -341,13 +341,8 @@ namespace IXICore
             return presence_chunks;
         }
 
-        public bool verify(ulong minDifficulty)
+        public bool verify(IxiNumber minDifficulty)
         {
-            if (wallet.Length > 128 || wallet.Length < 4)
-            {
-                return false;
-            }
-
             if (pubkey == null || pubkey.Length < 32 || pubkey.Length > 2500)
             {
                 return false;
@@ -359,16 +354,18 @@ namespace IXICore
 
             bool validPowSolution = false;
 
-            if(powSolution == null)
+            if (powSolution == null)
             {
                 // do nothing
-            }else if (verifyPowSolution(powSolution, minDifficulty))
+            }
+            else if (IxianHandler.status == NodeStatus.warmUp
+                || verifyPowSolution(powSolution, minDifficulty, wallet))
             {
                 validPowSolution = true;
             }
             else
             {
-                Logging.warn("Invalid pow solution received in verifyPresence, verification failed for {0}.", Base58Check.Base58CheckEncoding.EncodePlain(wallet));
+                Logging.warn("Invalid pow solution received in verifyPresence, verification failed for {0}.", wallet.ToString());
                 powSolution = null;
             }
 
@@ -379,7 +376,7 @@ namespace IXICore
                     continue;
                 }
 
-                if (entry.nodeVersion.Length > 64)
+                if (entry.nodeVersion.Length > 20)
                 {
                     continue;
                 }
@@ -400,7 +397,7 @@ namespace IXICore
                         // TODO "IxianHandler.getLastBlockVersion() >= BlockVer.v10" can be removed after v10 upgrade
                         if (IxianHandler.getLastBlockVersion() >= BlockVer.v10 && !validPowSolution)
                         {
-                            Logging.warn("'{0}' type node detected with no pow solution received in verify for {1}.", entry.type, Base58Check.Base58CheckEncoding.EncodePlain(wallet));
+                            Logging.warn("'{0}' type node detected with no pow solution received in verify for {1}.", entry.type, wallet.ToString());
                             continue;
                         }
                         break;
@@ -413,19 +410,19 @@ namespace IXICore
                 // Check for tampering. Includes a +300, -30 second synchronization zone
                 if ((currentTime - lTimestamp) > expiration_time)
                 {
-                    Logging.warn("[PL] Received expired presence for {0} {1}. Skipping; {2} - {3}", Crypto.hashToString(wallet), entry.address, currentTime, lTimestamp);
+                    Logging.warn("[PL] Received expired presence for {0} {1}. Skipping; {2} - {3}", wallet.ToString(), entry.address, currentTime, lTimestamp);
                     continue;
                 }
 
                 if ((currentTime - lTimestamp) < -30)
                 {
-                    Logging.warn("[PL] Potential presence tampering for {0} {1}. Skipping; {2} - {3}", Crypto.hashToString(wallet), entry.address, currentTime, lTimestamp);
+                    Logging.warn("[PL] Potential presence tampering for {0} {1}. Skipping; {2} - {3}", wallet.ToString(), entry.address, currentTime, lTimestamp);
                     continue;
                 }
 
-                if (!entry.verifySignature(wallet, pubkey))
+                if (!entry.verifySignature(wallet, pubkey, powSolution))
                 {
-                    Logging.warn("Invalid presence address received in verifyPresence, signature verification failed for {0}.", Base58Check.Base58CheckEncoding.EncodePlain(wallet));
+                    Logging.warn("Invalid presence address received in verifyPresence, signature verification failed for {0}.", wallet.ToString());
                     continue;
                 }
 
@@ -441,37 +438,28 @@ namespace IXICore
             return false;
         }
 
-        public bool verifyPowSolution(SignerPowSolution signerPow, ulong minDifficulty)
+        public static bool verifyPowSolution(SignerPowSolution signerPow, IxiNumber minDifficulty, Address wallet)
         {
             // TODO Omega remove this once blockHash is part of SignerPowSolution
             if(PresenceList.myPresenceType == 'C' || PresenceList.myPresenceType == 'R')
             {
                 return true;
             }
-            if (IxianHandler.getLastBlockHeight() - signerPow.blockNum > ConsensusConfig.plPowBlocksValidity)
+            if (signerPow.blockNum + ConsensusConfig.plPowBlocksValidity < IxianHandler.getLastBlockHeight())
             {
-                Logging.warn("Expired pow solution received in verifyPowSolution, verification failed for {0}.", Base58Check.Base58CheckEncoding.EncodePlain(wallet));
+                Logging.warn("Expired pow solution received in verifyPowSolution, verification failed for {0}.", wallet.ToString());
                 return false;
             }
-            BlockHeader plPowBlock = IxianHandler.getBlockHeader(signerPow.blockNum);
+            Block plPowBlock = IxianHandler.getBlockHeader(signerPow.blockNum);
             if (plPowBlock == null)
             {
-                Logging.warn("No block for PL pow solution found in verifyPowSolution, verification failed for {0}.", Base58Check.Base58CheckEncoding.EncodePlain(wallet));
+                Logging.warn("No block for PL pow solution found in verifyPowSolution, verification failed for {0}.", wallet.ToString());
                 return false;
             }
 
-            if (!signerPow.verifySignature(pubkey))
-            {
-                Logging.warn("Invalid pow signature received in verifyPowSolution, verification failed for {0}.", Base58Check.Base58CheckEncoding.EncodePlain(wallet));
-                return false;
-            }
-            byte[] blockHash = plPowBlock.blockChecksum;
-            byte[] solutionHash = SignerPowSolution.nonceToHash(signerPow.solution, blockHash, wallet);
-            signerPow.difficulty = SignerPowSolution.hashToDifficulty(solutionHash);
-                
             if (signerPow.difficulty < minDifficulty)
             {
-                Logging.warn("Invalid or empty pow solution received in verifyPowSolution, verification failed for {0}.", Base58Check.Base58CheckEncoding.EncodePlain(wallet));
+                Logging.warn("Invalid or empty pow solution received in verifyPowSolution, verification failed for {0}.", wallet.ToString());
                 return false;
             }
             return true;

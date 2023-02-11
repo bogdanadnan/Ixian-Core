@@ -20,14 +20,15 @@ namespace IXICore
 {
     public class KeepAlive
     {
-        public int version = 1;
-        public byte[] walletAddress = null;
+        public int version = 2;
+        public Address walletAddress = null;
         public byte[] deviceId = null;
         public long timestamp = 0;
         public string hostName = null;
         public byte[] signature = null;
         public char nodeType;
         public byte[] checksum = null; // Checksum is not transmitted over network
+        public SignerPowSolution powSolution;
 
         public KeepAlive()
         {
@@ -69,8 +70,8 @@ namespace IXICore
                 {
                     writer.Write(1); // version
 
-                    writer.Write(walletAddress.Length);
-                    writer.Write(walletAddress);
+                    writer.Write(walletAddress.addressWithChecksum.Length);
+                    writer.Write(walletAddress.addressWithChecksum);
 
                     writer.Write(new System.Guid(deviceId).ToString());
 
@@ -80,7 +81,7 @@ namespace IXICore
                     writer.Write(hostName);
                     writer.Write(nodeType);
 
-                    if(!forChecksum)
+                    if (!forChecksum)
                     {
                         // Add a verifiable signature
                         writer.Write(signature.Length);
@@ -105,8 +106,8 @@ namespace IXICore
                 {
                     writer.WriteIxiVarInt(2); // version
 
-                    writer.WriteIxiVarInt(walletAddress.Length);
-                    writer.Write(walletAddress);
+                    writer.WriteIxiVarInt(walletAddress.addressNoChecksum.Length);
+                    writer.Write(walletAddress.addressNoChecksum);
 
                     writer.WriteIxiVarInt(deviceId.Length);
                     writer.Write(deviceId);
@@ -117,7 +118,17 @@ namespace IXICore
                     writer.Write(hostName);
                     writer.Write(nodeType);
 
-                    if(!forChecksum)
+                    if(powSolution != null)
+                    {
+                        var solutionBytes = powSolution.getBytes();
+                        writer.WriteIxiVarInt(solutionBytes.Length);
+                        writer.Write(solutionBytes);
+                    }else
+                    {
+                        writer.WriteIxiVarInt(0);
+                    }
+
+                    if (!forChecksum)
                     {
                         writer.WriteIxiVarInt(signature.Length);
                         writer.Write(signature);
@@ -144,7 +155,7 @@ namespace IXICore
                         version = reader.ReadInt32();
 
                         int walletLen = reader.ReadInt32();
-                        walletAddress = reader.ReadBytes(walletLen);
+                        walletAddress = new Address(reader.ReadBytes(walletLen));
 
                         string device_id_str = reader.ReadString();
                         deviceId = System.Guid.Parse(device_id_str).ToByteArray();
@@ -180,14 +191,20 @@ namespace IXICore
                         version = (int)reader.ReadIxiVarInt();
 
                         int walletLen = (int)reader.ReadIxiVarUInt();
-                        walletAddress = reader.ReadBytes(walletLen);
+                        walletAddress = new Address(reader.ReadBytes(walletLen));
 
                         int deviceid_len = (int)reader.ReadIxiVarUInt();
                         deviceId = reader.ReadBytes(deviceid_len);
-                        timestamp = reader.ReadIxiVarInt();
+                        timestamp = (long)reader.ReadIxiVarUInt();
                         hostName = reader.ReadString();
 
                         nodeType = reader.ReadChar();
+
+                        int powSolutionLen = (int)reader.ReadIxiVarUInt();
+                        if(powSolutionLen > 0)
+                        {
+                            powSolution = new SignerPowSolution(reader.ReadBytes(powSolutionLen), walletAddress);
+                        }
 
                         int sigLen = (int)reader.ReadIxiVarUInt();
                         signature = reader.ReadBytes(sigLen);
@@ -219,7 +236,7 @@ namespace IXICore
                 byte[] tmpBytesWithLock = new byte[ConsensusConfig.ixianChecksumLock.Length + tmpBytes.Length];
                 Array.Copy(ConsensusConfig.ixianChecksumLock, tmpBytesWithLock, ConsensusConfig.ixianChecksumLock.Length);
                 Array.Copy(tmpBytes, 0, tmpBytesWithLock, ConsensusConfig.ixianChecksumLock.Length, tmpBytes.Length);
-                checksum = Crypto.sha512sq(tmpBytesWithLock);
+                checksum = CryptoManager.lib.sha3_512sqTrunc(tmpBytesWithLock);
             }
         }
 
@@ -232,6 +249,29 @@ namespace IXICore
             calculateChecksum();
 
             signature = CryptoManager.lib.getSignature(checksum, privateKey);
+        }
+
+        public bool verify(byte[] pubKey, IxiNumber minDifficulty)
+        {
+            if (powSolution == null)
+            {
+                // do nothing
+            }
+            else if (IxianHandler.status != NodeStatus.warmUp
+                && !Presence.verifyPowSolution(powSolution, minDifficulty, walletAddress))
+            {
+                Logging.warn("Invalid pow solution received in verifyPresence, verification failed for {0}.", walletAddress.ToString());
+                powSolution = null;
+                return false;
+            }
+
+            if (!verifySignature(pubKey))
+            {
+                Logging.warn("[PL] KEEPALIVE tampering for {0} {1}, incorrect Sig.", walletAddress.ToString(), hostName);
+                return false;
+            }
+
+            return true;
         }
 
         public bool verifySignature(byte[] pubKey)

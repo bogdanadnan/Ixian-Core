@@ -15,6 +15,7 @@ using IXICore.Utils;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 
 namespace IXICore.Meta
 {
@@ -37,21 +38,23 @@ namespace IXICore.Meta
     {
         // Required
         public abstract ulong getHighestKnownNetworkBlockHeight();
-        public abstract BlockHeader getBlockHeader(ulong blockNum);
+        public abstract Block getBlockHeader(ulong blockNum);
         public abstract Block getLastBlock();
         public abstract ulong getLastBlockHeight();
         public abstract int getLastBlockVersion();
         public abstract bool addTransaction(Transaction tx, bool force_broadcast);
         public abstract bool isAcceptingConnections();
-        public abstract Wallet getWallet(byte[] id);
-        public abstract IxiNumber getWalletBalance(byte[] id);
+        public abstract Wallet getWallet(Address id);
+        public abstract IxiNumber getWalletBalance(Address id);
         public abstract void parseProtocolMessage(ProtocolMessageCode code, byte[] data, RemoteEndpoint endpoint);
 
         public abstract void shutdown();
 
         // Optional
         public virtual void receivedTransactionInclusionVerificationResponse(byte[] txid, bool verified) { }
-        public virtual void receivedBlockHeader(BlockHeader block_header, bool verified) { }
+        public virtual void receivedBlockHeader(Block block_header, bool verified) { }
+
+        public abstract IxiNumber getMinSignerPowDifficulty(ulong blockNum);
     }
 
     public static class IxianHandler
@@ -78,7 +81,7 @@ namespace IXICore.Meta
         /// </summary>
         public static bool isTestNet { get; private set; } = false;
 
-        public static byte[] primaryWalletAddress = null;
+        public static Address primaryWalletAddress = null;
         public static Dictionary<byte[], WalletStorage> wallets = new Dictionary<byte[], WalletStorage>(new ByteArrayComparer());
 
         public static void init(string product_version, IxianNode handler_class, NetworkType type, bool set_title = false,
@@ -167,13 +170,13 @@ namespace IXICore.Meta
             return handlerClass.isAcceptingConnections();
         }
 
-        public static Wallet getWallet(byte[] id)
+        public static Wallet getWallet(Address address)
         {
             verifyHandler();
-            return handlerClass.getWallet(id);
+            return handlerClass.getWallet(address);
         }
 
-        public static IxiNumber getWalletBalance(byte[] id)
+        public static IxiNumber getWalletBalance(Address id)
         {
             verifyHandler();
             return handlerClass.getWalletBalance(id);
@@ -185,13 +188,13 @@ namespace IXICore.Meta
             handlerClass.receivedTransactionInclusionVerificationResponse(txid, verified);
         }
 
-        public static void receivedBlockHeader(BlockHeader block_header, bool verified)
+        public static void receivedBlockHeader(Block block_header, bool verified)
         {
             verifyHandler();
             handlerClass.receivedBlockHeader(block_header, verified);
         }
 
-        public static BlockHeader getBlockHeader(ulong blockNum)
+        public static Block getBlockHeader(ulong blockNum)
         {
             verifyHandler();
             return handlerClass.getBlockHeader(blockNum);
@@ -210,13 +213,19 @@ namespace IXICore.Meta
             handlerClass.shutdown();
         }
 
-        public static WalletStorage getWalletStorage(byte[] walletAddress = null)
+        public static IxiNumber getMinSignerPowDifficulty(ulong blockNum)
+        {
+            verifyHandler();
+            return handlerClass.getMinSignerPowDifficulty(blockNum);
+        }
+
+        public static WalletStorage getWalletStorage(Address walletAddress = null)
         {
             if (walletAddress == null)
             {
-                return wallets[primaryWalletAddress];
+                return wallets[primaryWalletAddress.addressNoChecksum];
             }
-            return wallets[walletAddress];
+            return wallets[walletAddress.addressNoChecksum];
         }
 
         public static WalletStorage getWalletStorageByFilename(string filename)
@@ -231,7 +240,7 @@ namespace IXICore.Meta
             return null;
         }
 
-        public static WalletStorage getWalletStorageBySecondaryAddress(byte[] walletAddress)
+        public static WalletStorage getWalletStorageBySecondaryAddress(Address walletAddress)
         {
             lock (wallets)
             {
@@ -255,29 +264,29 @@ namespace IXICore.Meta
                 {
                     primaryWalletAddress = ws.getPrimaryAddress();
                 }
-                if (wallets.ContainsKey(ws.getPrimaryAddress()))
+                if (wallets.ContainsKey(ws.getPrimaryAddress().addressNoChecksum))
                 {
                     return false;
                 }
-                wallets.Add(ws.getPrimaryAddress(), ws);
+                wallets.Add(ws.getPrimaryAddress().addressNoChecksum, ws);
             }
             return true;
         }
 
-        public static bool removeWallet(byte[] walletAddress)
+        public static bool removeWallet(Address walletAddress)
         {
             lock(wallets)
             {
-                if(walletAddress.SequenceEqual(primaryWalletAddress))
+                if(walletAddress.addressNoChecksum.SequenceEqual(primaryWalletAddress.addressNoChecksum))
                 {
-                    Logging.warn("Cannot remove primary wallet {0}", Base58Check.Base58CheckEncoding.EncodePlain(primaryWalletAddress));
+                    Logging.warn("Cannot remove primary wallet {0}", primaryWalletAddress.ToString());
                     return false;
                 }
-                return wallets.Remove(walletAddress);
+                return wallets.Remove(walletAddress.addressNoChecksum);
             }
         }
 
-        public static bool isMyAddress(byte[] walletAddress)
+        public static bool isMyAddress(Address walletAddress)
         {
             lock(wallets)
             {
@@ -292,7 +301,7 @@ namespace IXICore.Meta
             return false;
         }
 
-        public static Dictionary<byte[], List<byte[]>> extractMyAddressesFromAddressList(SortedDictionary<byte[], IxiNumber> addressList, bool useSeedHashAsKey = true)
+        public static Dictionary<byte[], List<byte[]>> extractMyAddressesFromAddressList(IDictionary<Address, Transaction.ToEntry> addressList, bool useSeedHashAsKey = true)
         {
             Dictionary<byte[], List<byte[]>> addresses = new Dictionary<byte[], List<byte[]>>();
             lock (wallets)

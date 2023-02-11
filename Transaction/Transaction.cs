@@ -36,6 +36,164 @@ namespace IXICore
     /// </remarks>
     public class Transaction
     {
+        public class PoWSolution
+        {
+            public ulong blockNum { get; private set; } = 0;
+            public byte[] nonce { get; private set; } = null;
+
+            public PoWSolution(byte[] bytes, int txVersion)
+            {
+                using (MemoryStream m = new MemoryStream(bytes))
+                {
+                    using (BinaryReader reader = new BinaryReader(m))
+                    {
+                        if (txVersion >= 7)
+                        {
+                            blockNum = reader.ReadIxiVarUInt();
+                            int nonce_bytes_len = (int)reader.ReadIxiVarUInt();
+                            nonce = reader.ReadBytes(nonce_bytes_len);
+                        }
+                        else
+                        {
+                            blockNum = reader.ReadUInt64();
+
+                            var blockHeader = IxianHandler.getBlockHeader(blockNum);
+
+                            if (blockHeader == null)
+                            {
+                                throw new Exception("Cannot construct PoWSolution, missing block #" + blockNum);
+                            }
+
+                            int blockVersion = blockHeader.version;
+
+                            if (blockVersion >= BlockVer.v2)
+                            {
+                                nonce = Crypto.stringToHash(reader.ReadString());
+                            }
+                            else
+                            {
+                                nonce = UTF8Encoding.UTF8.GetBytes(reader.ReadString());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        public class ToEntry
+        {
+            private int txVersion = 0;
+            public IxiNumber amount { get; private set; } = 0;
+
+            /// <summary>
+            ///  Optional data included with the transaction. This can be any byte-field. The transaction fee will increase with the amount of data.
+            /// </summary>
+            private byte[] _data = null;
+
+            /// <summary>
+            ///  Optional data included with the transaction. This can be any byte-field. The transaction fee will increase with the amount of data.
+            /// </summary>
+            public byte[] data
+            {
+                get { return _data; }
+                set
+                {
+                    _data = value;
+                    if (_data != null)
+                    {
+                        _dataChecksum = calculateDataChecksum();
+                    }
+                }
+            }
+
+            /// <summary>
+            ///  Checksum of optional data included with the transaction.
+            /// </summary>
+            private byte[] _dataChecksum = null;
+            public byte[] dataChecksum
+            {
+                get { return _dataChecksum; }
+                set
+                {
+                    _dataChecksum = value;
+                    _data = null;
+                }
+            }
+
+            public ToEntry(int txVersion, byte[] bytes)
+            {
+                this.txVersion = txVersion;
+                using (MemoryStream m = new MemoryStream(bytes))
+                {
+                    using (BinaryReader reader = new BinaryReader(m))
+                    {
+                        int dataChecksumLen = (int)reader.ReadIxiVarUInt();
+                        if (dataChecksumLen > 0)
+                        {
+                            _dataChecksum = reader.ReadBytes(dataChecksumLen);
+                        }
+                        int dataLen = (int)reader.ReadIxiVarUInt();
+                        if (dataLen > 0)
+                        {
+                            data = reader.ReadBytes(dataLen);
+                        }
+                    }
+                }
+            }
+
+            public ToEntry(int txVersion, IxiNumber amount, byte[] data = null, byte[] dataChecksum = null)
+            {
+                this.txVersion = txVersion;
+                this.amount = amount;
+                if (data != null)
+                {
+                    this.data = data;
+                }
+                else
+                {
+                    this.dataChecksum = dataChecksum;
+                }
+            }
+
+            /// <summary>
+            ///  Calculates the transaction's data checksum and returns it.
+            /// </summary>
+            /// <returns>Transaction's data checksum, or null transaction data is null.</returns>
+            private byte[] calculateDataChecksum()
+            {
+                if (_data != null)
+                {
+                    if (txVersion < 7)
+                    {
+                        return Crypto.sha512sqTrunc(_data, 0, 0, 32);
+                    }
+                    return CryptoManager.lib.sha3_512sqTrunc(_data, 0, 0, 32);
+                }
+                return null;
+            }
+
+            public byte[] getBytes()
+            {
+                using (MemoryStream m = new MemoryStream(832))
+                {
+                    using (BinaryWriter writer = new BinaryWriter(m))
+                    {
+                        if(_dataChecksum != null)
+                        {
+                            writer.WriteIxiVarInt(_dataChecksum.Length);
+                            writer.Write(_dataChecksum);
+                        }
+                        if (_data != null)
+                        {
+                            writer.WriteIxiVarInt(_data.Length);
+                            writer.Write(_data);
+                        }
+                    }
+                    return m.ToArray();
+                }
+            }
+        }
+
         /// <summary>
         ///  Type of the transaction.
         /// </summary>
@@ -72,7 +230,8 @@ namespace IXICore
             ///  When a transaction involving a 'Multi-Signature' is first posted, it only has one signature, so this stub transaction is used to
             ///  add signatures so that private key sharing is not required among signers.
             /// </summary>
-            MultisigAddTxSignature = 6
+            MultisigAddTxSignature = 6,
+            RegName = 7
         }
 
         /// <summary>
@@ -113,7 +272,7 @@ namespace IXICore
             /// <summary>
             ///  Wallet address of the new signer that is being added.
             /// </summary>
-            public byte[] addrToAdd;
+            public Address addrToAdd;
             /// <summary>
             ///  Public key of the new signer that is being validating this transaction, if neccessary.
             /// </summary>
@@ -138,7 +297,7 @@ namespace IXICore
             /// <summary>
             ///  Wallet address of the signer that is being removed.
             /// </summary>
-            public byte[] addrToDel;
+            public Address addrToDel;
             /// <summary>
             ///  Public key of the signer that is validating this transaction, if neccessary.
             /// </summary>
@@ -230,7 +389,7 @@ namespace IXICore
         ///  The address can either be a wallet address or a nonce value which was used to generate the address. If the value
         ///  is a nonce value, then the public key, `pubKey`, for the transaction must be specified.
         /// </remarks>
-        public SortedDictionary<byte[], IxiNumber> fromList = new SortedDictionary<byte[], IxiNumber>(new ByteArrayComparer());
+        public IDictionary<byte[], IxiNumber> fromList = new Dictionary<byte[], IxiNumber>(new ByteArrayComparer());
         /// <summary>
         ///  Destination wallets where the funds will be deposited. Each address specifies the amount of Ixi being deposited to it.
         /// </summary>
@@ -238,31 +397,8 @@ namespace IXICore
         ///  The sum of all amounts must be equal to `amount`, otherwise the transaction is invalid. Destination wallets can belong to
         ///  different signing keys.
         /// </remarks>
-        public SortedDictionary<byte[], IxiNumber> toList = new SortedDictionary<byte[], IxiNumber>(new ByteArrayComparer());
+        public IDictionary<Address, ToEntry> toList = new Dictionary<Address, ToEntry>(new AddressComparer());
 
-        /// <summary>
-        ///  Optional data included with the transaction. This can be any byte-field. The transaction fee will increase with the amount of data.
-        /// </summary>
-        private byte[] _data;
-
-        /// <summary>
-        ///  Optional data included with the transaction. This can be any byte-field. The transaction fee will increase with the amount of data.
-        /// </summary>
-        public byte[] data
-        {
-            get { return _data; }
-            set {
-                _data = value;
-                if (_data != null)
-                {
-                    dataChecksum = calculateDataChecksum();
-                }
-            }
-        }
-        /// <summary>
-        ///  Checksum of optional data included with the transaction.
-        /// </summary>
-        public byte[] dataChecksum;
         /// <summary>
         ///  Block number when the transaction was generated.
         /// </summary>
@@ -286,7 +422,7 @@ namespace IXICore
         /// <summary>
         ///  Publick key which performed the signature and owns the source wallets in `fromList`.
         /// </summary>
-        public byte[] pubKey;
+        public Address pubKey;
         /// <summary>
         ///  Block height at which the transaction is about to be applied. Temporary variable, only used during applying block's transactions
         /// </summary>
@@ -311,7 +447,24 @@ namespace IXICore
         /// <summary>
         ///  Currently latest transaction version.
         /// </summary>
-        public static int maxVersion = 6;
+        public static int maxVersion = 7;
+
+        private PoWSolution _powSolution = null;
+        public PoWSolution powSolution
+        {
+            get
+            {
+                if (_powSolution != null)
+                {
+                    return _powSolution;
+                }
+                if (type == (int)Transaction.Type.PoWSolution)
+                {
+                    _powSolution = new PoWSolution(toList.First().Value.data, version);
+                }
+                return _powSolution;
+            }
+        }
 
         /// <summary>
         ///  Sets the transaction's version appropriately, based on the current block version.
@@ -351,9 +504,14 @@ namespace IXICore
             else if (block_version < BlockVer.v8)
             {
                 ver = 5;
-            }else if (block_version < BlockVer.v9)
+            }
+            else if (block_version < BlockVer.v10)
             {
                 ver = 6;
+            }
+            else if (block_version < BlockVer.v11)
+            {
+                ver = 7;
             }
             else
             {
@@ -366,7 +524,7 @@ namespace IXICore
         /// Creates an empty transaction of the specified type.
         /// </summary>
         /// <param name="tx_type">Transaction type. See `Transaction.Type`.</param>
-        public Transaction(int tx_type, byte[] tx_data_checksum = null, byte[] tx_data = null)
+        public Transaction(int tx_type)
         {
             setVersion();
 
@@ -381,9 +539,22 @@ namespace IXICore
 
             applied = 0;
             readyToApply = 0;
+        }
 
-            dataChecksum = tx_data_checksum;
-            _data = tx_data;
+        public Transaction(int tx_type, int version)
+        {
+            this.version = version;
+            type = tx_type;
+
+            timeStamp = Clock.getNetworkTimestamp();
+            amount = new IxiNumber("0");
+            fee = new IxiNumber("0");
+            blockHeight = 0;
+
+            nonce = getRandomNonce();
+
+            applied = 0;
+            readyToApply = 0;
         }
 
         /// <summary>
@@ -403,17 +574,17 @@ namespace IXICore
         /// <param name="tx_blockHeight">Block height when the transaction was generated.</param>
         /// <param name="tx_nonce">Unique transaction nonce value.</param>
         /// <param name="tx_timestamp">Timestamp (unix epoch) when the transaction was generated.</param>
-        public Transaction(int tx_type, IxiNumber tx_amount, IxiNumber tx_feePerKb, byte[] tx_to, byte[] tx_from, byte[] tx_data, byte[] tx_pubKey, ulong tx_blockHeight, int tx_nonce = -1, long tx_timestamp = 0)
+        public Transaction(int tx_type, IxiNumber tx_amount, IxiNumber tx_feePerKb, Address tx_to, Address tx_from, byte[] tx_data, Address tx_pubKey, ulong tx_blockHeight, int tx_nonce = -1, long tx_timestamp = 0)
         {
             setVersion();
 
             type = tx_type;
 
             amount = tx_amount;
-            toList.Add(tx_to, amount);
-            fromList.Add(new byte[1] { 0 }, amount);
 
-            data = tx_data;
+            ToEntry toEntry = new ToEntry(version, amount, tx_data);
+            toList.Add(tx_to, toEntry);
+            fromList.Add(new byte[1] { 0 }, amount);
 
             blockHeight = tx_blockHeight;
 
@@ -472,7 +643,7 @@ namespace IXICore
         /// <param name="tx_blockHeight">Block number when the transaction was generated.</param>
         /// <param name="tx_nonce">Unique nonce value for the transaction.</param>
         /// <param name="tx_timestamp">Timestamp (unich epoch) when the transaction was generated.</param>
-        public Transaction(int tx_type, IxiNumber tx_feePerKb, SortedDictionary<byte[], IxiNumber> tx_toList, byte[] tx_from, byte[] tx_data, byte[] tx_pubKey, ulong tx_blockHeight, int tx_nonce = -1, long tx_timestamp = 0)
+        public Transaction(int tx_type, IxiNumber tx_feePerKb, IDictionary<Address, ToEntry> tx_toList, Address tx_from, Address tx_pubKey, ulong tx_blockHeight, int tx_nonce = -1, long tx_timestamp = 0)
         {
             setVersion();
 
@@ -484,8 +655,6 @@ namespace IXICore
             amount = calculateTotalAmount();
 
             fromList.Add(new byte[1] { 0 }, amount);
-
-            data = tx_data;
 
             blockHeight = tx_blockHeight;
 
@@ -547,7 +716,7 @@ namespace IXICore
         /// <param name="tx_blockHeight">Block number when the transaction was generated.</param>
         /// <param name="tx_nonce">Unique nonce value for the transaction.</param>
         /// <param name="sign_transaction">True if the signature should be calculated, false if the signature will be calculated later</param>
-        public Transaction(int tx_type, IxiNumber tx_feePerKb, SortedDictionary<byte[], IxiNumber> tx_toList, SortedDictionary<byte[], IxiNumber> tx_fromList, byte[] tx_data, byte[] tx_pubKey, ulong tx_blockHeight, int tx_nonce = -1, bool sign_transaction = true)
+        public Transaction(int tx_type, IxiNumber tx_feePerKb, IDictionary<Address, ToEntry> tx_toList, IDictionary<byte[], IxiNumber> tx_fromList, Address tx_pubKey, ulong tx_blockHeight, int tx_nonce = -1, bool sign_transaction = true)
         {
             setVersion();
 
@@ -559,8 +728,6 @@ namespace IXICore
             amount = calculateTotalAmount();
 
             fromList = tx_fromList;
-
-            data = tx_data;
 
             blockHeight = tx_blockHeight;
 
@@ -610,35 +777,36 @@ namespace IXICore
             amount = new IxiNumber(tx_transaction.amount.getAmount());
             fee = new IxiNumber(tx_transaction.fee.getAmount());
 
-            toList = new SortedDictionary<byte[], IxiNumber>(new ByteArrayComparer());
+            toList = new Dictionary<Address, ToEntry>(new AddressComparer());
 
             foreach (var entry in tx_transaction.toList)
             {
-                byte[] address = new byte[entry.Key.Length];
-                Array.Copy(entry.Key, address, address.Length);
-                toList.Add(address, new IxiNumber(entry.Value.getAmount()));
+                byte[] address = new byte[entry.Key.addressNoChecksum.Length];
+                Array.Copy(entry.Key.addressNoChecksum, address, address.Length);
+
+                byte[] copiedData = null;
+                byte[] copiedDataChecksum = null;
+                if (entry.Value.data != null)
+                {
+                    copiedData = new byte[entry.Value.data.Length];
+                    Array.Copy(entry.Value.data, copiedData, copiedData.Length);
+                } else if(entry.Value.dataChecksum != null)
+                {
+                    copiedDataChecksum = new byte[entry.Value.dataChecksum.Length];
+                    Array.Copy(entry.Value.dataChecksum, copiedDataChecksum, copiedDataChecksum.Length);
+                }
+
+                ToEntry toEntry = new ToEntry(version, new IxiNumber(entry.Value.amount.getAmount()), copiedData, copiedDataChecksum);
+                toList.Add(new Address(address), toEntry);
             }
 
-            fromList = new SortedDictionary<byte[], IxiNumber>(new ByteArrayComparer());
+            fromList = new Dictionary<byte[], IxiNumber>(new ByteArrayComparer());
 
             foreach (var entry in tx_transaction.fromList)
             {
                 byte[] address = new byte[entry.Key.Length];
                 Array.Copy(entry.Key, address, address.Length);
                 fromList.Add(address, new IxiNumber(entry.Value.getAmount()));
-            }
-
-
-            if (tx_transaction.dataChecksum != null)
-            {
-                dataChecksum = new byte[tx_transaction.dataChecksum.Length];
-                Array.Copy(tx_transaction.dataChecksum, dataChecksum, dataChecksum.Length);
-            }
-
-            if (tx_transaction._data != null)
-            {
-                _data = new byte[tx_transaction._data.Length];
-                Array.Copy(tx_transaction._data, _data, _data.Length);
             }
 
             blockHeight = tx_transaction.blockHeight;
@@ -659,8 +827,8 @@ namespace IXICore
 
             if (tx_transaction.pubKey != null)
             {
-                pubKey = new byte[tx_transaction.pubKey.Length];
-                Array.Copy(tx_transaction.pubKey, pubKey, pubKey.Length);
+                var pubKeyInput = tx_transaction.pubKey.getInputBytes();
+                pubKey = new Address(pubKeyInput);
             }
 
             readyToApply = tx_transaction.readyToApply;
@@ -676,20 +844,24 @@ namespace IXICore
         ///  Constructs a transaction object from the serialized transaction data. See also `getBytes()`.
         /// </summary>
         /// <param name="bytes">Byte-field with the serialized transaction</param>
-        /// <param name="include_applied">Whether to include the 'applied' flag when reading the transaction data.</param>
-        public Transaction(byte[] bytes, bool include_applied = false)
+        /// <param name="includeApplied">Whether to include the 'applied' flag when reading the transaction data.</param>
+        public Transaction(byte[] bytes, bool includeApplied = false, bool forceV7Structure = false)
         {
-            if (bytes[0] < 6)
+            if (forceV7Structure || bytes[0] >= 7)
             {
-                fromBytesLegacy(bytes, include_applied);
+                fromBytesV7(bytes, includeApplied);
             }
-            else
+            else if (bytes[0] < 6)
             {
-                fromBytesV6(bytes, include_applied);
+                fromBytesLegacy(bytes, includeApplied);
+            }
+            else if(bytes[0] == 6)
+            {
+                fromBytesV6(bytes, includeApplied);
             }
         }
 
-        public void fromBytesLegacy(byte[] bytes, bool include_applied = false)
+        private void fromBytesLegacy(byte[] bytes, bool include_applied = false)
         {
             try
             {
@@ -720,13 +892,15 @@ namespace IXICore
                                     address = reader.ReadBytes(addrLen);
                                 }
                                 IxiNumber amount = new IxiNumber(reader.ReadString());
-                                toList.Add(address, amount);
+                                ToEntry toEntry = new ToEntry(version, amount);
+
+                                toList.Add(new Address(address), toEntry);
                             }
 
                             if (version <= 1)
                             {
                                 int fromLen = reader.ReadInt32();
-                                pubKey = reader.ReadBytes(fromLen);
+                                pubKey = new Address(reader.ReadBytes(fromLen));
                                 fromList.Add(new byte[1] { 0 }, amount + fee);
                             }
                             else
@@ -750,14 +924,18 @@ namespace IXICore
                                 int dataChecksumLen = reader.ReadInt32();
                                 if (dataChecksumLen > 0)
                                 {
-                                    dataChecksum = reader.ReadBytes(dataChecksumLen);
+                                    byte[] dataChecksum = reader.ReadBytes(dataChecksumLen);
+
+                                    toList.First().Value.dataChecksum = dataChecksum;
                                 }
                             }
 
                             int dataLen = reader.ReadInt32();
                             if (dataLen > 0)
                             {
-                                _data = reader.ReadBytes(dataLen);
+                                byte[] data = reader.ReadBytes(dataLen);
+
+                                toList.First().Value.data = data;
                             }
 
 
@@ -782,7 +960,7 @@ namespace IXICore
                             int pkLen = reader.ReadInt32();
                             if (pkLen > 0)
                             {
-                                pubKey = reader.ReadBytes(pkLen);
+                                pubKey = new Address(reader.ReadBytes(pkLen));
                             }
 
                             try
@@ -800,19 +978,6 @@ namespace IXICore
                             }
 
                             generateChecksums();
-
-                            if (version >= 4 && data != null)
-                            {
-                                if (dataChecksum == null)
-                                {
-                                    throw new Exception("Invalid transaction's data checksum, should be non null.");
-                                }
-
-                                if (!calculateDataChecksum().SequenceEqual(dataChecksum))
-                                {
-                                    throw new Exception("Invalid transaction's data checksum.");
-                                }
-                            }
                         }
                         else
                         {
@@ -827,7 +992,7 @@ namespace IXICore
                 throw;
             }
         }
-        public void fromBytesV6(byte[] bytes, bool include_applied = false)
+        private void fromBytesV6(byte[] bytes, bool include_applied = false)
         {
             try
             {
@@ -860,7 +1025,8 @@ namespace IXICore
                                 address = reader.ReadBytes(addrLen);
                             }
                             IxiNumber amount = reader.ReadIxiNumber();
-                            toList.Add(address, amount);
+                            ToEntry toEntry = new ToEntry(version, amount);
+                            toList.Add(new Address(address), toEntry);
                         }
 
                         int fromListLen = (int)reader.ReadIxiVarInt();
@@ -879,13 +1045,15 @@ namespace IXICore
                         int dataChecksumLen = (int)reader.ReadIxiVarInt();
                         if (dataChecksumLen > 0)
                         {
-                            dataChecksum = reader.ReadBytes(dataChecksumLen);
+                            byte[] dataChecksum = reader.ReadBytes(dataChecksumLen);
+                            toList.First().Value.dataChecksum = dataChecksum;
                         }
 
                         int dataLen = (int)reader.ReadIxiVarInt();
                         if (dataLen > 0)
                         {
-                            _data = reader.ReadBytes(dataLen);
+                            byte[] data = reader.ReadBytes(dataLen);
+                            toList.First().Value.data = data;
                         }
 
 
@@ -898,7 +1066,7 @@ namespace IXICore
                         int crcLen = (int)reader.ReadIxiVarInt();
                         if (crcLen > 0)
                         {
-                            checksum = reader.ReadBytes(crcLen); // TODO TODO TODO not necessary, can be removed with tx v7
+                            checksum = reader.ReadBytes(crcLen);
                         }
 
                         int sigLen = (int)reader.ReadIxiVarInt();
@@ -910,7 +1078,7 @@ namespace IXICore
                         int pkLen = (int)reader.ReadIxiVarInt();
                         if (pkLen > 0)
                         {
-                            pubKey = reader.ReadBytes(pkLen);
+                            pubKey = new Address(reader.ReadBytes(pkLen));
                         }
 
                         ulong tmp_applied = reader.ReadIxiVarUInt();
@@ -920,19 +1088,111 @@ namespace IXICore
                         }
 
                         generateChecksums();
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Logging.error("Exception occurred while trying to construct Transaction from bytes: " + e);
+                throw;
+            }
+        }
 
-                        if (data != null)
+        private void fromBytesV7(byte[] bytes, bool include_applied = false)
+        {
+            try
+            {
+                if (bytes.Length > 512000)
+                {
+                    throw new Exception("Transaction size is bigger than 500kB.");
+                }
+                using (MemoryStream m = new MemoryStream(bytes))
+                {
+                    using (BinaryReader reader = new BinaryReader(m))
+                    {
+                        version = (int)reader.ReadIxiVarUInt();
+
+                        if (version > maxVersion)
                         {
-                            if (dataChecksum == null)
+                            throw new Exception("Unknown transaction version " + version);
+                        }
+
+                        type = (int)reader.ReadIxiVarInt();
+
+                        blockHeight = reader.ReadIxiVarUInt();
+
+                        amount = 0;
+                        int fromListLen = (int)reader.ReadIxiVarUInt();
+                        for (int i = 0; i < fromListLen; i++)
+                        {
+                            int addrLen = (int)reader.ReadIxiVarUInt();
+                            byte[] address = null;
+                            if (addrLen > 0)
                             {
-                                throw new Exception("Invalid transaction's data checksum, should be non null.");
+                                address = reader.ReadBytes(addrLen);
+                            }
+                            IxiNumber singleAmount = reader.ReadIxiNumber();
+                            amount += singleAmount;
+                            reader.ReadIxiVarUInt(); // TODO TODO Omega v11?
+                            reader.ReadIxiVarUInt(); // TODO TODO Omega v11?
+                            fromList.Add(address, singleAmount);
+                        }
+                        fee = amount;
+
+                        int toListLen = (int)reader.ReadIxiVarUInt();
+                        for (int i = 0; i < toListLen; i++)
+                        {
+                            int addrLen = (int)reader.ReadIxiVarUInt();
+                            byte[] address = reader.ReadBytes(addrLen);
+
+                            IxiNumber singleAmount = reader.ReadIxiNumber();
+                            fee -= singleAmount;
+
+                            int dataChecksumLen = (int)reader.ReadIxiVarUInt();
+                            byte[] dataChecksum = null;
+                            if (dataChecksumLen > 0)
+                            {
+                                dataChecksum = reader.ReadBytes(dataChecksumLen);
                             }
 
-                            if (!calculateDataChecksum().SequenceEqual(dataChecksum))
+                            int dataLen = (int)reader.ReadIxiVarUInt();
+                            byte[] data = null;
+                            if(dataLen > 0)
                             {
-                                throw new Exception("Invalid transaction's data checksum.");
+                                data = reader.ReadBytes(dataLen);
                             }
+
+                            ToEntry toEntry = new ToEntry(version, singleAmount, data, dataChecksum);
+                            toList.Add(new Address(address), toEntry);
                         }
+                        amount -= fee;
+
+                        nonce = (int)reader.ReadIxiVarInt();
+
+                        int pkLen = (int)reader.ReadIxiVarUInt();
+                        if (pkLen > 0)
+                        {
+                            pubKey = new Address(reader.ReadBytes(pkLen));
+                        }
+
+                        int sigLen = (int)reader.ReadIxiVarUInt();
+                        if (sigLen > 0)
+                        {
+                            signature = reader.ReadBytes(sigLen);
+                        }
+
+                        ulong tmp_applied = reader.ReadIxiVarUInt();
+                        if (include_applied)
+                        {
+                            applied = tmp_applied;
+                        }
+
+                        if (version < 7)
+                        {
+                            timeStamp = (long)reader.ReadIxiVarUInt();
+                        }
+
+                        generateChecksums();
                     }
                 }
             }
@@ -947,16 +1207,21 @@ namespace IXICore
         ///  Serializes the transaction object for transmission and returns a byte-field. See also the constructor `Transaction(byte[])`.
         /// </summary>
         /// <returns>Byte-field with the serialized transaction, suiteable for network transmission.</returns>
-        public byte[] getBytes(bool include_applied = true)
+        public byte[] getBytes(bool include_applied = true, bool forceV7Structure = false)
         {
-            if (version < 6)
+            if (forceV7Structure || version >= 7)
+            {
+                return getBytesV7(include_applied);
+            }
+            else if (version < 6)
             {
                 return getBytesLegacy(include_applied);
             }
-            else
+            else if(version == 6)
             {
                 return getBytesV6(include_applied);
             }
+            return null;
         }
 
         private byte[] getBytesLegacy(bool include_applied = false)
@@ -976,14 +1241,14 @@ namespace IXICore
                     writer.Write(toList.Count);
                     foreach (var entry in toList)
                     {
-                        writer.Write(entry.Key.Length);
-                        writer.Write(entry.Key);
-                        writer.Write(entry.Value.ToString());
+                        writer.Write(entry.Key.addressWithChecksum.Length);
+                        writer.Write(entry.Key.addressWithChecksum);
+                        writer.Write(entry.Value.amount.ToString());
                     }
 
                     if (version <= 1)
                     {
-                        byte[] tmp_address = (new Address(pubKey)).address;
+                        byte[] tmp_address = pubKey.addressWithChecksum;
                         writer.Write(tmp_address.Length);
                         writer.Write(tmp_address);
                     }else
@@ -999,6 +1264,7 @@ namespace IXICore
 
                     if(version >= 4)
                     {
+                        byte[] dataChecksum = toList.First().Value.dataChecksum;
                         if (dataChecksum != null)
                         {
                             writer.Write(dataChecksum.Length);
@@ -1010,6 +1276,7 @@ namespace IXICore
                         }
                     }
 
+                    byte[] data = toList.First().Value.data;
                     if (data != null)
                     {
                         writer.Write(data.Length);
@@ -1042,11 +1309,19 @@ namespace IXICore
                         writer.Write((int)0);
                     }
 
-                    if ((version <= 1 && pubKey != null && pubKey.Length > 36)
+                    if ((version <= 1 && pubKey != null && pubKey.pubKey != null)
                         || version >= 2)
                     {
-                        writer.Write(pubKey.Length);
-                        writer.Write(pubKey);
+                        byte[] pkBytes;
+                        if (pubKey.pubKey != null)
+                        {
+                            pkBytes = pubKey.pubKey;
+                        }else
+                        {
+                            pkBytes = pubKey.addressWithChecksum;
+                        }
+                        writer.Write(pkBytes.Length);
+                        writer.Write(pkBytes);
                     }else
                     {
                         writer.Write((int)0);
@@ -1084,41 +1359,31 @@ namespace IXICore
                     writer.WriteIxiVarInt(toList.Count);
                     foreach (var entry in toList)
                     {
+                        writer.WriteIxiVarInt(entry.Key.addressWithChecksum.Length);
+                        writer.Write(entry.Key.addressWithChecksum);
+                        writer.WriteIxiNumber(entry.Value.amount);
+                    }
+
+                    writer.WriteIxiVarInt(fromList.Count);
+                    foreach (var entry in fromList)
+                    {
                         writer.WriteIxiVarInt(entry.Key.Length);
                         writer.Write(entry.Key);
                         writer.WriteIxiNumber(entry.Value);
                     }
 
-                    if (version <= 1)
+                    byte[] dataChecksum = toList.First().Value.dataChecksum;
+                    if (dataChecksum != null)
                     {
-                        byte[] tmp_address = (new Address(pubKey)).address;
-                        writer.WriteIxiVarInt(tmp_address.Length);
-                        writer.Write(tmp_address);
+                        writer.WriteIxiVarInt(dataChecksum.Length);
+                        writer.Write(dataChecksum);
                     }
                     else
                     {
-                        writer.WriteIxiVarInt(fromList.Count);
-                        foreach (var entry in fromList)
-                        {
-                            writer.WriteIxiVarInt(entry.Key.Length);
-                            writer.Write(entry.Key);
-                            writer.WriteIxiNumber(entry.Value);
-                        }
+                        writer.WriteIxiVarInt((int)0);
                     }
 
-                    if (version >= 4)
-                    {
-                        if (dataChecksum != null)
-                        {
-                            writer.WriteIxiVarInt(dataChecksum.Length);
-                            writer.Write(dataChecksum);
-                        }
-                        else
-                        {
-                            writer.WriteIxiVarInt((int)0);
-                        }
-                    }
-
+                    byte[] data = toList.First().Value.data;
                     if (data != null)
                     {
                         writer.WriteIxiVarInt(data.Length);
@@ -1135,7 +1400,7 @@ namespace IXICore
 
                     if (checksum != null)
                     {
-                        writer.WriteIxiVarInt(checksum.Length); // TODO TODO TODO not necessary, can be removed with tx v7
+                        writer.WriteIxiVarInt(checksum.Length);
                         writer.Write(checksum);
                     }
                     else
@@ -1153,11 +1418,20 @@ namespace IXICore
                         writer.WriteIxiVarInt((int)0);
                     }
 
-                    if ((version <= 1 && pubKey != null && pubKey.Length > 36)
+                    if ((version <= 1 && pubKey != null && pubKey.pubKey != null)
                         || version >= 2)
                     {
-                        writer.WriteIxiVarInt(pubKey.Length);
-                        writer.Write(pubKey);
+                        byte[] pkBytes;
+                        if (pubKey.pubKey != null)
+                        {
+                            pkBytes = pubKey.pubKey;
+                        }
+                        else
+                        {
+                            pkBytes = pubKey.addressWithChecksum;
+                        }
+                        writer.WriteIxiVarInt(pkBytes.Length);
+                        writer.Write(pkBytes);
                     }
                     else
                     {
@@ -1181,6 +1455,111 @@ namespace IXICore
             }
         }
 
+        private byte[] getBytesV7(bool include_applied = false, bool for_checksum = false)
+        {
+            using (MemoryStream m = new MemoryStream(832))
+            {
+                using (BinaryWriter writer = new BinaryWriter(m))
+                {
+                    if(for_checksum)
+                    {
+                        writer.Write(ConsensusConfig.ixianChecksumLock);
+                    }
+
+                    writer.WriteIxiVarInt(version);
+
+                    writer.WriteIxiVarInt(type);
+
+                    writer.WriteIxiVarInt(blockHeight);
+
+                    writer.WriteIxiVarInt(fromList.Count);
+                    foreach (var entry in fromList)
+                    {
+                        writer.WriteIxiVarInt(entry.Key.Length);
+                        writer.Write(entry.Key);
+                        writer.WriteIxiNumber(entry.Value);
+                        writer.WriteIxiVarInt((int)0); // TODO TODO Omega v11?
+                        if (!for_checksum)
+                        {
+                            writer.WriteIxiVarInt((int)0); // TODO TODO Omega v11?
+                        }
+                    }
+                    writer.WriteIxiVarInt(toList.Count);
+                    foreach (var entry in toList)
+                    {
+                        writer.WriteIxiVarInt(entry.Key.addressNoChecksum.Length);
+                        writer.Write(entry.Key.addressNoChecksum);
+                        writer.WriteIxiNumber(entry.Value.amount);
+
+                        if (entry.Value.data == null && entry.Value.dataChecksum != null)
+                        {
+                            writer.WriteIxiVarInt(entry.Value.dataChecksum.Length);
+                            writer.Write(entry.Value.dataChecksum);
+                        }
+                        else
+                        {
+                            writer.WriteIxiVarInt((int)0);
+                        }
+                        if(!for_checksum)
+                        {
+                            if (entry.Value.data != null)
+                            {
+                                writer.WriteIxiVarInt(entry.Value.data.Length);
+                                writer.Write(entry.Value.data);
+                            }
+                            else
+                            {
+                                writer.WriteIxiVarInt((int)0);
+                            }
+                        }
+                    }
+
+                    writer.WriteIxiVarInt(nonce);
+
+                    if (pubKey != null)
+                    {
+                        writer.WriteIxiVarInt(pubKey.getInputBytes().Length);
+                        writer.Write(pubKey.getInputBytes());
+                    }else
+                    {
+                        writer.WriteIxiVarInt((int)0);
+                    }
+
+                    if (!for_checksum)
+                    {
+                        if (signature != null)
+                        {
+                            writer.WriteIxiVarInt(signature.Length);
+                            writer.Write(signature);
+                        }
+                        else
+                        {
+                            writer.WriteIxiVarInt((int)0);
+                        }
+
+                        if (include_applied)
+                        {
+                            writer.WriteIxiVarInt(applied);
+                        }
+                        else
+                        {
+                            writer.WriteIxiVarInt((ulong)0);
+                        }
+                    }
+
+                    if (version < 7)
+                    {
+                        writer.WriteIxiVarInt(timeStamp);
+                    }
+
+#if TRACE_MEMSTREAM_SIZES
+                    Logging.info(String.Format("Transaction::getBytes: {0}", m.Length));
+#endif
+                }
+                return m.ToArray();
+            }
+        }
+
         /// <summary>
         ///  Checks if the two transactions are exactly equal.
         /// </summary>
@@ -1188,8 +1567,8 @@ namespace IXICore
         /// <returns>True if both objects represent the same Ixian transaction.</returns>
         public bool equals(Transaction tx)
         {
-            byte[] a1 = getBytes(false);
-            byte[] a2 = tx.getBytes(false);
+            byte[] a1 = getBytes(false, true);
+            byte[] a2 = tx.getBytes(false, true);
 
             return a1.SequenceEqual(a2);
         }
@@ -1215,8 +1594,8 @@ namespace IXICore
 
             Address p_address = new Address(pubkey, nonce);
             bool allowed = false;
-            Wallet from_wallet = IxianHandler.getWallet((new Address(this.pubKey)).address);
-            if(from_wallet != null && from_wallet.id.SequenceEqual(p_address.address))
+            Wallet from_wallet = IxianHandler.getWallet(this.pubKey);
+            if(from_wallet != null && from_wallet.id.addressNoChecksum.SequenceEqual(p_address.addressNoChecksum))
             {
                 allowed = true;
             } else if (type == (int)Transaction.Type.MultisigTX || type == (int)Transaction.Type.ChangeMultisigWallet || type == (int)Transaction.Type.MultisigAddTxSignature)
@@ -1226,7 +1605,7 @@ namespace IXICore
                 {
                     foreach(var allowed_signer in from_wallet.allowedSigners)
                     {
-                        if(allowed_signer.SequenceEqual(p_address.address))
+                        if(allowed_signer.addressNoChecksum.SequenceEqual(p_address.addressNoChecksum))
                         {
                             allowed = true;
                         }
@@ -1238,7 +1617,7 @@ namespace IXICore
 
             if(signature == null || pubkey == null)
             {
-                Logging.warn("Signature or pubkey for received txid {0} was null, verification failed.", txIdV8ToLegacy(id));
+                Logging.warn("Signature or pubkey for received txid {0} was null, verification failed.", getTxIdString());
                 return false;
             }
 
@@ -1260,9 +1639,9 @@ namespace IXICore
                 if (type == (int)Type.StakingReward)
                 {
 
-                    if (data != null)
+                    if (toList.First().Value.data != null)
                     {
-                        ulong blockNum = BitConverter.ToUInt64(data, 0);
+                        ulong blockNum = BitConverter.ToUInt64(toList.First().Value.data, 0);
                         if (blockNum > 0)
                         {
                             txid = "stk-" + blockNum + "-";
@@ -1281,20 +1660,20 @@ namespace IXICore
 
                 if (toList.Count == 1)
                 {
-                    rawData.AddRange(toList.ToArray()[0].Key);
+                    rawData.AddRange(toList.ToArray()[0].Key.addressWithChecksum);
                 }
                 else
                 {
                     foreach (var entry in toList)
                     {
-                        rawData.AddRange(entry.Key);
-                        rawData.AddRange(entry.Value.getAmount().ToByteArray());
+                        rawData.AddRange(entry.Key.addressWithChecksum);
+                        rawData.AddRange(entry.Value.amount.getAmount().ToByteArray());
                     }
                 }
 
                 if (fromList.Count == 1)
                 {
-                    rawData.AddRange(new Address(pubKey).address);
+                    rawData.AddRange(pubKey.addressWithChecksum);
                 }
                 else
                 {
@@ -1303,12 +1682,12 @@ namespace IXICore
                         rawData.AddRange(entry.Key);
                         rawData.AddRange(entry.Value.getAmount().ToByteArray());
                     }
-                    rawData.AddRange(new Address(pubKey).address);
+                    rawData.AddRange(pubKey.addressWithChecksum);
                 }
 
                 rawData.AddRange(BitConverter.GetBytes(blockHeight));
                 rawData.AddRange(BitConverter.GetBytes(nonce));
-                rawData.AddRange(BitConverter.GetBytes((int)0)); // version was replaced with this, as it's tx metadata and shouldn't be part of the ID
+                rawData.AddRange(BitConverter.GetBytes((int)0));
                 if (version <= 2)
                 {
                     chk = Base58Check.Base58CheckEncoding.EncodePlain(Crypto.sha512quTrunc(rawData.ToArray()));
@@ -1355,9 +1734,12 @@ namespace IXICore
             if(transaction.version < 6)
             {
                 return calculateChecksumLegacy(transaction);
-            }else
+            }else if(transaction.version == 6)
             {
                 return calculateChecksum_v6(transaction);
+            }else
+            {
+                return CryptoManager.lib.sha3_512sqTrunc(transaction.getBytesV7(false, true));
             }
         }
 
@@ -1367,27 +1749,27 @@ namespace IXICore
             rawData.AddRange(ConsensusConfig.ixianChecksumLock);
             if (transaction.version < 5)
             {
-                rawData.AddRange(Encoding.UTF8.GetBytes(txIdV8ToLegacy(transaction.id)));
+                rawData.AddRange(Encoding.UTF8.GetBytes(transaction.getTxIdString()));
             }
             rawData.AddRange(BitConverter.GetBytes(transaction.type));
             rawData.AddRange(Encoding.UTF8.GetBytes(transaction.amount.ToString()));
             rawData.AddRange(Encoding.UTF8.GetBytes(transaction.fee.ToString()));
             if (transaction.toList.Count == 1)
             {
-                rawData.AddRange(transaction.toList.ToArray()[0].Key);
+                rawData.AddRange(transaction.toList.ToArray()[0].Key.addressWithChecksum);
             }
             else
             {
                 foreach (var entry in transaction.toList)
                 {
-                    rawData.AddRange(entry.Key);
-                    rawData.AddRange(entry.Value.getAmount().ToByteArray());
+                    rawData.AddRange(entry.Key.addressWithChecksum);
+                    rawData.AddRange(entry.Value.amount.getAmount().ToByteArray());
                 }
             }
 
             if (transaction.fromList.Count == 1)
             {
-                rawData.AddRange(new Address(transaction.pubKey).address);
+                rawData.AddRange(transaction.pubKey.addressWithChecksum);
             }
             else
             {
@@ -1400,16 +1782,16 @@ namespace IXICore
 
             if (transaction.version < 4)
             {
-                if (transaction.data != null)
+                if (transaction.toList.First().Value.data != null)
                 {
-                    rawData.AddRange(transaction.data);
+                    rawData.AddRange(transaction.toList.First().Value.data);
                 }
             }
             else
             {
-                if (transaction.dataChecksum != null)
+                if (transaction.toList.First().Value.dataChecksum != null)
                 {
-                    rawData.AddRange(transaction.dataChecksum);
+                    rawData.AddRange(transaction.toList.First().Value.dataChecksum);
                 }
             }
 
@@ -1420,10 +1802,19 @@ namespace IXICore
                 rawData.AddRange(BitConverter.GetBytes(transaction.timeStamp));
             }
             rawData.AddRange(BitConverter.GetBytes(transaction.version));
-            if ((transaction.version <= 1 && transaction.pubKey != null && transaction.pubKey.Length > 36)
+            if ((transaction.version <= 1 && transaction.pubKey != null && transaction.pubKey.pubKey != null)
                 || transaction.version >= 2)
             {
-                rawData.AddRange(transaction.pubKey);
+                byte[] pkBytes;
+                if (transaction.pubKey.pubKey != null)
+                {
+                    pkBytes = transaction.pubKey.pubKey;
+                }
+                else
+                {
+                    pkBytes = transaction.pubKey.addressWithChecksum;
+                }
+                rawData.AddRange(pkBytes);
             }
             if (transaction.version <= 2)
             {
@@ -1444,8 +1835,8 @@ namespace IXICore
             rawData.AddRange(transaction.fee.getBytes());
             foreach (var entry in transaction.toList)
             {
-                rawData.AddRange(entry.Key);
-                rawData.AddRange(entry.Value.getBytes());
+                rawData.AddRange(entry.Key.addressWithChecksum);
+                rawData.AddRange(entry.Value.amount.getBytes());
             }
 
             foreach (var entry in transaction.fromList)
@@ -1454,9 +1845,9 @@ namespace IXICore
                 rawData.AddRange(entry.Value.getBytes());
             }
 
-            if (transaction.dataChecksum != null)
+            if (transaction.toList.First().Value.dataChecksum != null)
             {
-                rawData.AddRange(transaction.dataChecksum);
+                rawData.AddRange(transaction.toList.First().Value.dataChecksum);
             }
 
             rawData.AddRange(BitConverter.GetBytes(transaction.blockHeight));
@@ -1466,7 +1857,14 @@ namespace IXICore
                 rawData.AddRange(BitConverter.GetBytes(transaction.timeStamp));
             }
             rawData.AddRange(BitConverter.GetBytes(transaction.version));
-            rawData.AddRange(transaction.pubKey);
+            if (transaction.pubKey.pubKey != null)
+            {
+                rawData.AddRange(transaction.pubKey.pubKey);
+            }
+            else
+            {
+                rawData.AddRange(transaction.pubKey.addressWithChecksum);
+            }
             return Crypto.sha512sqTrunc(rawData.ToArray());
         }
 
@@ -1483,7 +1881,7 @@ namespace IXICore
                 return CryptoManager.lib.getSignature(checksum, private_key);
             }
 
-            byte[] address =  new Address(pubKey).address;
+            Address address = pubKey;
 
             WalletStorage ws = IxianHandler.getWalletStorageBySecondaryAddress(address);
             if(ws != null)
@@ -1506,22 +1904,9 @@ namespace IXICore
             IxiNumber total = new IxiNumber(0);
             foreach(var entry in toList)
             {
-                total += entry.Value;
+                total += entry.Value.amount;
             }
             return total;
-        }
-
-        /// <summary>
-        ///  Calculates the transaction's data checksum and returns it.
-        /// </summary>
-        /// <returns>Transaction's data checksum, or null transaction data is null.</returns>
-        public byte[] calculateDataChecksum()
-        {
-            if(_data != null)
-            {
-                return Crypto.sha512sqTrunc(_data, 0, 0, 32);
-            }
-            return null;
         }
 
         /// <summary>
@@ -1541,7 +1926,7 @@ namespace IXICore
             {
                 bytesLen += 512;
             }
-            IxiNumber expectedFee = pricePerKb * (ulong)Math.Ceiling((double)bytesLen / 1000);
+            IxiNumber expectedFee = pricePerKb * (ulong)Math.Ceiling((double)bytesLen / 1000); // TODO TODO Omega
             return expectedFee;
         }
 
@@ -1575,9 +1960,8 @@ namespace IXICore
 #if TRACE_MEMSTREAM_SIZES
                         Logging.info(String.Format("Transaction::AddMultisigOrig: {0}", ms.Length));
 #endif
-
-                    data = ms.ToArray();
                 }
+                toList.First().Value.data = ms.ToArray();
             }
         }
 
@@ -1588,7 +1972,7 @@ namespace IXICore
         /// <param name="change_type">Operation - add or remove.</param>
         /// <param name="signer_pub_key">Signer, who is already on the multisig wallet's allowed list.</param>
         /// <param name="signer_nonce">Nonce value of the wallet which is allowed to make changes to the multisig wallet and can be signed with the `signer_pub_key`.</param>
-        private void AddMultisigChWallet(byte[] addr, MultisigWalletChangeType change_type, byte[] signer_pub_key, byte[] signer_nonce)
+        private void AddMultisigChWallet(Address addr, MultisigWalletChangeType change_type, byte[] signer_pub_key, byte[] signer_nonce)
         {
             using (MemoryStream ms = new MemoryStream())
             {
@@ -1596,8 +1980,8 @@ namespace IXICore
                 {
                     bw.Write((byte)change_type);
 
-                    bw.WriteIxiVarInt(addr.Length);
-                    bw.Write(addr);
+                    bw.WriteIxiVarInt(addr.addressNoChecksum.Length);
+                    bw.Write(addr.addressNoChecksum);
 
                     bw.WriteIxiVarInt(signer_pub_key.Length);
                     bw.Write(signer_pub_key);
@@ -1607,9 +1991,8 @@ namespace IXICore
 #if TRACE_MEMSTREAM_SIZES
                         Logging.info(String.Format("Transaction::AddMultisigChWallet: {0}", ms.Length));
 #endif
-
-                    data = ms.ToArray();
                 }
+                toList.First().Value.data = ms.ToArray();
             }
         }
 
@@ -1637,9 +2020,8 @@ namespace IXICore
 #if TRACE_MEMSTREAM_SIZES
                         Logging.info(String.Format("Transaction::AddMultisigChReqSigs: {0}", ms.Length));
 #endif
-
-                    data = ms.ToArray();
                 }
+                toList.First().Value.data = ms.ToArray();
             }
         }
 
@@ -1649,6 +2031,7 @@ namespace IXICore
         /// <returns>Multisig transaction data, or null if no valid object was found.</returns>
         private object getMultisigTxData()
         {
+            byte[] data = toList.First().Value.data;
             if (data == null || data.Length < 6)
             {
                 return null;
@@ -1680,10 +2063,6 @@ namespace IXICore
                         if (signer_pub_key_len < 36 || signer_pub_key_len > 2500)
                         {
                             Logging.warn(String.Format("Multisig transaction: Invalid signer pub key length stored in data: {0}", signer_pub_key_len));
-                            return null;
-                        }
-                        if (signer_pub_key_len == 0)
-                        {
                             return null;
                         }
                         byte[] signer_pub_key = rd.ReadBytes(signer_pub_key_len);
@@ -1723,6 +2102,7 @@ namespace IXICore
         /// <returns>One of the multisig change data objects, or null if no valid object was found.</returns>
         private object getChangeMultisigWalletData()
         {
+            byte[] data = toList.First().Value.data;
             if (data == null || data.Length < 6)
             {
                 return null;
@@ -1773,7 +2153,7 @@ namespace IXICore
 
                                 return new MultisigAddrAdd
                                 {
-                                    addrToAdd = ch_addr,
+                                    addrToAdd = new Address(ch_addr),
                                     signerPubKey = signer_pub_key,
                                     signerNonce = signer_nonce
                                 };
@@ -1813,7 +2193,7 @@ namespace IXICore
 
                                 return new MultisigAddrDel
                                 {
-                                    addrToDel = ch_addr,
+                                    addrToDel = new Address(ch_addr),
                                     signerPubKey = signer_pub_key,
                                     signerNonce = signer_nonce
                                 };
@@ -1847,14 +2227,14 @@ namespace IXICore
                                     signerNonce = signer_nonce
                                 };
                             default:
-                                Logging.warn("Invalid MultisigWalletChangeType for a multisig change transaction {{ {0} }}.", txIdV8ToLegacy(id));
+                                Logging.warn("Invalid MultisigWalletChangeType for a multisig change transaction {{ {0} }}.", getTxIdString());
                                 return null;
                         }
                     }
                     catch (Exception e)
                     {
                         // early EOL or strange data error
-                        Logging.error("Exception occurred in getChangeMultisigWalletData for txid {0}: {1}", txIdV8ToLegacy(id), e);
+                        Logging.error("Exception occurred in getChangeMultisigWalletData for txid {0}: {1}", getTxIdString(), e);
                         return null;
                     }
                 }
@@ -1867,7 +2247,8 @@ namespace IXICore
         /// <returns>A multisig data object, if found, or null.</returns>
         public object GetMultisigData()
         {
-            if (type == (int)Transaction.Type.MultisigTX || type == (int)Transaction.Type.MultisigAddTxSignature)
+            if (type == (int)Transaction.Type.MultisigTX
+                || type == (int)Transaction.Type.MultisigAddTxSignature)
             {
                 return getMultisigTxData();
             }
@@ -1877,7 +2258,7 @@ namespace IXICore
             }
             else
             {
-                Logging.info(String.Format("Transaction {{ {0} }} is not a multisig transaction, so MultisigData cannot be retrieved.", txIdV8ToLegacy(id)));
+                Logging.info(String.Format("Transaction {{ {0} }} is not a multisig transaction, so MultisigData cannot be retrieved.", getTxIdString()));
                 return null;
             }
         }
@@ -1887,7 +2268,7 @@ namespace IXICore
         /// </summary>
         /// <param name="multisig_address">Multisig address to check.</param>
         /// <returns>Own address which is allowed to sign transactions for `multisig_address`, or null, if no such local address.</returns>
-        public static AddressData findMyMultisigAddressData(byte[] multisig_address)
+        public static AddressData findMyMultisigAddressData(Address multisig_address)
         {
             WalletStorage ws = IxianHandler.getWalletStorageBySecondaryAddress(multisig_address);
             if(ws != null)
@@ -1934,7 +2315,7 @@ namespace IXICore
         /// <param name="tx_from">Multisig wallet where the funds should be withdrawn.</param>
         /// <param name="tx_blockHeight">Blockheight at which the transaction is generated.</param>
         /// <returns>Generated transaction object.</returns>
-        public static Transaction multisigTransaction(IxiNumber tx_amount, IxiNumber tx_fee, byte[] tx_to, byte[] tx_from, ulong tx_blockHeight)
+        public static Transaction multisigTransaction(IxiNumber tx_amount, IxiNumber tx_fee, Address tx_to, Address tx_from, ulong tx_blockHeight)
         {
             Transaction t = new Transaction((int)Transaction.Type.MultisigTX, tx_amount, tx_fee, tx_to, tx_from, null, tx_from, tx_blockHeight);
 
@@ -1966,9 +2347,9 @@ namespace IXICore
         /// <param name="tx_from">Multisig wallet where the funds should be withdrawn.</param>
         /// <param name="tx_blockHeight">Blockheight at which the transaction is generated.</param>
         /// <returns>Generated transaction object.</returns>
-        public static Transaction multisigTransaction(IxiNumber tx_fee, SortedDictionary<byte[], IxiNumber> tx_to_list, byte[] tx_from, ulong tx_blockHeight)
+        public static Transaction multisigTransaction(IxiNumber tx_fee, IDictionary<Address, ToEntry> tx_to_list, Address tx_from, ulong tx_blockHeight)
         {
-            Transaction t = new Transaction((int)Transaction.Type.MultisigTX, tx_fee, tx_to_list, tx_from, null, tx_from, tx_blockHeight);
+            Transaction t = new Transaction((int)Transaction.Type.MultisigTX, tx_fee, tx_to_list, tx_from, tx_from, tx_blockHeight);
 
             // TODO TODO TODO TODO TODO TODO make this compatible with wallet v3
 
@@ -1999,7 +2380,7 @@ namespace IXICore
         /// <param name="tx_from">Own address which may be allowed to sign `orig_txid`.</param>
         /// <param name="tx_blockHeight">Block height at which to generate the new transaction/</param>
         /// <returns>Signing transaction.</returns>
-        public static Transaction multisigAddTxSignature(byte[] orig_txid, IxiNumber tx_fee, byte[] tx_from, ulong tx_blockHeight)
+        public static Transaction multisigAddTxSignature(byte[] orig_txid, IxiNumber tx_fee, Address tx_from, ulong tx_blockHeight)
         {
             Transaction t = new Transaction((int)Transaction.Type.MultisigAddTxSignature, new IxiNumber(0), tx_fee, tx_from, tx_from, null, tx_from, tx_blockHeight);
 
@@ -2034,7 +2415,7 @@ namespace IXICore
         /// <param name="tx_from">Multisig address where the `allowed_address` will be added.</param>
         /// <param name="tx_blockHeight">Block height at which to generate the new transaction/</param>
         /// <returns>Multisig change transaction.</returns>
-        public static Transaction multisigAddKeyTransaction(byte[] allowed_address,  IxiNumber tx_fee, byte[] tx_from, ulong tx_blockHeight)
+        public static Transaction multisigAddKeyTransaction(Address allowed_address,  IxiNumber tx_fee, Address tx_from, ulong tx_blockHeight)
         {
             Transaction t = new Transaction((int)Transaction.Type.ChangeMultisigWallet, new IxiNumber(0), tx_fee, tx_from, tx_from, null, tx_from, tx_blockHeight);
 
@@ -2069,7 +2450,7 @@ namespace IXICore
         /// <param name="tx_from">Multisig address where the `allowed_address` will be added.</param>
         /// <param name="tx_blockHeight">Block height at which to generate the new transaction/</param>
         /// <returns>Multisig change transaction.</returns>
-        public static Transaction multisigDelKeyTransaction(byte[] disallowed_address, IxiNumber tx_fee, byte[] tx_from, ulong tx_blockHeight)
+        public static Transaction multisigDelKeyTransaction(Address disallowed_address, IxiNumber tx_fee, Address tx_from, ulong tx_blockHeight)
         {
             Transaction t = new Transaction((int)Transaction.Type.ChangeMultisigWallet, new IxiNumber(0), tx_fee, tx_from, tx_from, null, tx_from, tx_blockHeight);
 
@@ -2105,7 +2486,7 @@ namespace IXICore
         /// <param name="tx_from">Multisig address where the `allowed_address` will be added.</param>
         /// <param name="tx_blockHeight">Block height at which to generate the new transaction/</param>
         /// <returns>Multisig change transaction.</returns>
-        public static Transaction multisigChangeReqSigs(byte sigs, IxiNumber tx_fee, byte[] tx_from, ulong tx_blockHeight)
+        public static Transaction multisigChangeReqSigs(byte sigs, IxiNumber tx_fee, Address tx_from, ulong tx_blockHeight)
         {
             Transaction t = new Transaction((int)Transaction.Type.ChangeMultisigWallet, new IxiNumber(0), tx_fee, tx_from, tx_from, null, tx_from, tx_blockHeight);
 
@@ -2136,7 +2517,7 @@ namespace IXICore
         public Dictionary<string, object> toDictionary()
         {
             Dictionary<string, object> tDic = new Dictionary<string, object>();
-            tDic.Add("id", txIdV8ToLegacy(id));
+            tDic.Add("id", getTxIdString());
             tDic.Add("version", version);
             tDic.Add("blockHeight", blockHeight.ToString());
             tDic.Add("nonce", nonce.ToString());
@@ -2148,12 +2529,18 @@ namespace IXICore
 
             if (pubKey != null)
             {
-                tDic.Add("pubKey", Base58Check.Base58CheckEncoding.EncodePlain(pubKey));
+                if (pubKey.pubKey != null)
+                {
+                    tDic.Add("pubKey", Base58Check.Base58CheckEncoding.EncodePlain(pubKey.pubKey));
+                }else
+                {
+                    tDic.Add("pubKey", Base58Check.Base58CheckEncoding.EncodePlain(pubKey.addressWithChecksum));
+                }
             }
 
-            if (data != null)
+            if (toList.First().Value.data != null)
             {
-                tDic.Add("data", Crypto.hashToString(data));
+                tDic.Add("data", Crypto.hashToString(toList.First().Value.data));
             }
 
             tDic.Add("timestamp", timeStamp.ToString());
@@ -2172,7 +2559,7 @@ namespace IXICore
             Dictionary<string, string> toListDic = new Dictionary<string, string>();
             foreach (var entry in toList)
             {
-                toListDic.Add(Base58Check.Base58CheckEncoding.EncodePlain(entry.Key), entry.Value.ToString());
+                toListDic.Add(entry.Key.ToString(), entry.Value.amount.ToString());
             }
             tDic.Add("to", toListDic);
 
@@ -2220,8 +2607,14 @@ namespace IXICore
             return b_txid;
         }
 
-        public static string txIdV8ToLegacy(byte[] txid)
+        public string getTxIdString()
         {
+            return getTxIdString(id);
+        }
+
+        public static string getTxIdString(byte[] txid)
+        {
+            // TODO Omega - this needs to be updated after rocksdb and when other parts of code isn't relying on it anymore
             string s_txid;
             var type_ret = IxiVarInt.GetIxiVarUInt(txid, 0);
             int type = (int)type_ret.num;
@@ -2243,6 +2636,5 @@ namespace IXICore
             }
             return s_txid;
         }
-
     }
 }

@@ -29,7 +29,13 @@ namespace IXICore
         private static Presence curNodePresence = null;
 
         // private
-        private static Dictionary<char, long> presenceCount = new Dictionary<char, long>();
+        private static Dictionary<char, long> presenceCount = new Dictionary<char, long>() {
+            { 'C', 0 },
+            { 'H', 0 },
+            { 'M', 0 },
+            { 'R', 0 },
+            { 'W', 0 }
+        };
 
         private static Thread keepAliveThread;
         private static bool autoKeepalive = false;
@@ -87,17 +93,23 @@ namespace IXICore
                 return null;
             }
 
-            bool updated = false;
-
             long currentTime = Clock.getNetworkTimestamp();
 
             lock (presences)
             {
-                Presence pr = presences.Find(x => x.wallet.SequenceEqual(presence.wallet));
+                Presence pr = presences.Find(x => x.wallet.addressNoChecksum.SequenceEqual(presence.wallet.addressNoChecksum));
                 if (pr != null)
                 {
                     lock (pr)
                     {
+                        Presence diffPresence = new Presence()
+                        {
+                            wallet = presence.wallet,
+                            pubkey = presence.pubkey,
+                            metadata = presence.metadata,
+                            powSolution = presence.powSolution,
+                            version = presence.version
+                        };
                         // Go through all addresses and add any missing ones
                         foreach (PresenceAddress local_addr in presence.addresses)
                         {
@@ -113,13 +125,13 @@ namespace IXICore
                             // Check for tampering. Includes a +300, -30 second synchronization zone
                             if ((currentTime - lTimestamp) > expiration_time)
                             {
-                                Logging.warn(string.Format("[PL] Received expired presence for {0} {1}. Skipping; {2} - {3}", Crypto.hashToString(pr.wallet), local_addr.address, currentTime, lTimestamp));
+                                Logging.warn("[PL] Received expired presence for {0} {1}. Skipping; {2} - {3}", pr.wallet.ToString(), local_addr.address, currentTime, lTimestamp);
                                 continue;
                             }
 
                             if ((currentTime - lTimestamp) < -30)
                             {
-                                Logging.warn(string.Format("[PL] Potential presence tampering for {0} {1}. Skipping; {2} - {3}", Crypto.hashToString(pr.wallet), local_addr.address, currentTime, lTimestamp));
+                                Logging.warn("[PL] Potential presence tampering for {0} {1}. Skipping; {2} - {3}", pr.wallet.ToString(), local_addr.address, currentTime, lTimestamp);
                                 continue;
                             }
 
@@ -142,7 +154,16 @@ namespace IXICore
                                         addr.address = local_addr.address;
                                         addr.lastSeenTime = local_addr.lastSeenTime;
                                         addr.signature = local_addr.signature;
-                                        updated = true;
+                                        if (addr.type != local_addr.type)
+                                        {
+                                            lock (presenceCount)
+                                            {
+                                                presenceCount[addr.type]--;
+                                                presenceCount[local_addr.type]++;
+                                            }
+                                            addr.type = local_addr.type;
+                                        }
+                                        diffPresence.addresses.Add(local_addr);
                                     }
 
                                     if (addr.type == 'M' || addr.type == 'H')
@@ -150,7 +171,7 @@ namespace IXICore
                                         PeerStorage.addPeerToPeerList(addr.address, presence.wallet, Clock.getTimestamp(), 0, 0, 0);
                                     }
 
-                                    //Console.WriteLine("[PL] Last time updated for {0}", addr.device);
+                                    //Logging.info("[PL] Last time updated for {0}", addr.device);
                                 }
                             }
                             else
@@ -166,31 +187,27 @@ namespace IXICore
 
                                 lock (presenceCount)
                                 {
-                                    if (!presenceCount.ContainsKey(local_addr.type))
-                                    {
-                                        presenceCount.Add(local_addr.type, 0);
-                                    }
                                     presenceCount[local_addr.type]++;
                                 }
 
-                                updated = true;
+                                diffPresence.addresses.Add(local_addr);
                             }
                         }
 
-                        if (!updated && return_presence_only_if_updated)
+                        if (diffPresence.addresses.Count == 0 && return_presence_only_if_updated)
                         {
                             return null;
                         }
                         else
                         {
-                            return pr;
+                            return diffPresence;
                         }
                     }
                 }
                 else
                 {
                     // Insert a new entry
-                    //Console.WriteLine("[PL] Adding new entry for {0}", presence.wallet);
+                    //Logging.info("[PL] Adding new entry for {0}", presence.wallet);
 
                     foreach (PresenceAddress pa in presence.addresses)
                     {
@@ -201,38 +218,22 @@ namespace IXICore
 
                         lock (presenceCount)
                         {
-                            if (!presenceCount.ContainsKey(pa.type))
-                            {
-                                presenceCount.Add(pa.type, 0);
-                            }
                             presenceCount[pa.type]++;
                         }
-
-                        updated = true;
                     }
+                    presences.Add(presence);
 
-                    if (updated)
-                    {
-                        presences.Add(presence);
-                    }
-
-                    if (!updated && return_presence_only_if_updated)
-                    {
-                        return null;
-                    }else
-                    {
-                        return presence;
-                    }
+                    return presence;
                 }
             }
         }
 
-        public static bool removeAddressEntry(byte[] wallet_address, PresenceAddress address = null)
+        public static bool removeAddressEntry(Address wallet_address, PresenceAddress address = null)
         {
             lock (presences)
             {
-                //Console.WriteLine("[PL] Received removal for {0} : {1}", wallet_address, address.address);
-                Presence listEntry = presences.Find(x => x.wallet.SequenceEqual(wallet_address));
+                //Logging.info("[PL] Received removal for {0} : {1}", wallet_address, address.address);
+                Presence listEntry = presences.Find(x => x.wallet.addressNoChecksum.SequenceEqual(wallet_address.addressNoChecksum));
 
                 // Check if there is such an entry in the presence list
                 if (listEntry != null)
@@ -253,16 +254,13 @@ namespace IXICore
                         {
                             lock (presenceCount)
                             {
-                                if (presenceCount.ContainsKey(addr.type))
-                                {
-                                    presenceCount[addr.type]--;
-                                }
+                                presenceCount[addr.type]--;
                             }
                             listEntry.addresses.Remove(addr);
                         }
 
                         int address_count = listEntry.addresses.Count;
-                        //Console.WriteLine("[PL] --->> Addresses: {0}", address_count);
+                        //Logging.info("[PL] --->> Addresses: {0}", address_count);
 
                         if (address_count == 0)
                         {
@@ -348,7 +346,7 @@ namespace IXICore
                             writer.Write(presence_data);
                         }
 #if TRACE_MEMSTREAM_SIZES
-                        Logging.info(String.Format("PresenceList::getBytes: {0}", m.Length));
+                        Logging.info("PresenceList::getBytes: {0}", m.Length);
 #endif
                     }
                     return m.ToArray();
@@ -396,7 +394,7 @@ namespace IXICore
                     }
                     catch (Exception e)
                     {
-                        Logging.error(string.Format("Error reading presence list: {0}", e.ToString()));
+                        Logging.error("Error reading presence list: {0}", e.ToString());
                         return false;
                     }
 
@@ -407,7 +405,7 @@ namespace IXICore
         }*/
 
         // Update a presence from a byte array
-        public static Presence updateFromBytes(byte[] bytes, ulong minDifficulty)
+        public static Presence updateFromBytes(byte[] bytes, IxiNumber minDifficulty)
         {
             Presence presence = new Presence(bytes);
 
@@ -450,7 +448,8 @@ namespace IXICore
             autoKeepalive = false;
             if (keepAliveThread != null)
             {
-                keepAliveThread.Abort();
+                keepAliveThread.Interrupt();
+                keepAliveThread.Join();
                 keepAliveThread = null;
             }
         }
@@ -458,88 +457,101 @@ namespace IXICore
         // Sends perioding keepalive network messages
         private static void keepAlive()
         {
-            forceSendKeepAlive = true;
-            while (autoKeepalive)
+            try
             {
-                TLC.Report();
-
-                int keepalive_interval = CoreConfig.serverKeepAliveInterval;
-
-                if (curNodePresenceAddress.type == 'C')
+                forceSendKeepAlive = true;
+                while (autoKeepalive)
                 {
-                    keepalive_interval = CoreConfig.clientKeepAliveInterval;
-                }
+                    TLC.Report();
 
-                // Wait x seconds before rechecking
-                for (int i = 0; i < keepalive_interval; i++)
-                {
-                    if (autoKeepalive == false)
+                    int keepalive_interval = CoreConfig.serverKeepAliveInterval;
+
+                    if (curNodePresenceAddress.type == 'C')
                     {
-                        return;
+                        keepalive_interval = CoreConfig.clientKeepAliveInterval;
                     }
-                    if (IxianHandler.publicIP == "")
+
+                    // Wait x seconds before rechecking
+                    for (int i = 0; i < keepalive_interval; i++)
                     {
-                        // do not send KA
-                        i = 0;
-                    }
-                    else
-                    {
-                        if (forceSendKeepAlive)
+                        if (autoKeepalive == false)
                         {
-                            Thread.Sleep(1000);
-                            forceSendKeepAlive = false;
-                            break;
+                            return;
                         }
+                        if (IxianHandler.publicIP == "")
+                        {
+                            // do not send KA
+                            i = 0;
+                        }
+                        else
+                        {
+                            if (forceSendKeepAlive)
+                            {
+                                Thread.Sleep(1000);
+                                forceSendKeepAlive = false;
+                                break;
+                            }
+                        }
+                        // Sleep for one second
+                        Thread.Sleep(1000);
                     }
-                    // Sleep for one second
-                    Thread.Sleep(1000);
+
+                    if (curNodePresenceAddress.type == 'W')
+                    {
+                        continue; // no need to send PL for worker nodes
+                    }
+
+                    try
+                    {
+                        KeepAlive ka = new KeepAlive()
+                        {
+                            deviceId = CoreConfig.device_id,
+                            hostName = curNodePresenceAddress.address,
+                            nodeType = curNodePresenceAddress.type,
+                            timestamp = Clock.getNetworkTimestamp(),
+                            walletAddress = IxianHandler.getWalletStorage().getPrimaryAddress(),
+                            powSolution = curNodePresence.powSolution
+                        };
+                        ka.sign(IxianHandler.getWalletStorage().getPrimaryPrivateKey());
+
+                        curNodePresenceAddress.lastSeenTime = ka.timestamp;
+                        curNodePresenceAddress.signature = ka.signature;
+
+                        byte[] ka_bytes = ka.getBytes();
+
+                        Address address = null;
+                        long last_seen = 0;
+                        byte[] device_id = null;
+
+                        // Update self presence
+                        receiveKeepAlive(ka_bytes, out address, out last_seen, out device_id, null);
+
+                        // Send this keepalive to all connected non-clients
+                        CoreProtocolMessage.broadcastProtocolMessage(new char[] { 'M', 'H', 'W' }, ProtocolMessageCode.keepAlivePresence, ka_bytes, address.addressNoChecksum);
+
+                        // Send this keepalive message to all connected clients
+                        CoreProtocolMessage.broadcastEventDataMessage(NetworkEvents.Type.keepAlive, address.addressNoChecksum, ProtocolMessageCode.keepAlivePresence, ka_bytes, address.addressNoChecksum);
+                    }
+                    catch (Exception e)
+                    {
+                        Logging.error("Exception occurred while generating keepalive: " + e);
+                    }
                 }
+            }
+            catch (ThreadInterruptedException)
+            {
 
-                if (curNodePresenceAddress.type == 'W')
-                {
-                    continue; // no need to send PL for worker nodes
-                }
-
-                try
-                {
-                    KeepAlive ka = new KeepAlive() { 
-                        deviceId = CoreConfig.device_id,
-                        hostName = curNodePresenceAddress.address,
-                        nodeType = curNodePresenceAddress.type,
-                        timestamp = Clock.getNetworkTimestamp(),
-                        walletAddress = IxianHandler.getWalletStorage().getPrimaryAddress()
-                    };
-                    ka.sign(IxianHandler.getWalletStorage().getPrimaryPrivateKey());
-
-                    curNodePresenceAddress.lastSeenTime = ka.timestamp;
-                    curNodePresenceAddress.signature = ka.signature;
-
-                    byte[] ka_bytes = ka.getBytes();
-
-                    byte[] address = null;
-                    long last_seen = 0;
-                    byte[] device_id = null;
-
-                    // Update self presence
-                    receiveKeepAlive(ka_bytes, out address, out last_seen, out device_id, null);
-
-                    // Send this keepalive to all connected non-clients
-                    CoreProtocolMessage.broadcastProtocolMessage(new char[] { 'M', 'H', 'W' }, ProtocolMessageCode.keepAlivePresence, ka_bytes, address);
-
-                    // Send this keepalive message to all connected clients
-                    CoreProtocolMessage.broadcastEventDataMessage(NetworkEvents.Type.keepAlive, address, ProtocolMessageCode.keepAlivePresence, ka_bytes, address);
-                }
-                catch (Exception e)
-                {
-                    Logging.error("Exception occurred while generating keepalive: " + e);
-                }
+            }
+            catch (Exception e)
+            {
+                Logging.error("KeepAlive exception: {0}", e);
             }
         }
 
         // Called when receiving a keepalive network message. The PresenceList will update the appropriate entry based on the timestamp.
         // Returns TRUE if it updated an entry in the PL
         // Sets the out address parameter to be the KA wallet's address or null if an error occurred
-        public static bool receiveKeepAlive(byte[] bytes, out byte[] wallet, out long last_seen, out byte[] device_id, RemoteEndpoint endpoint)
+        public static bool receiveKeepAlive(byte[] bytes, out Address wallet, out long last_seen, out byte[] device_id, RemoteEndpoint endpoint)
         {
             wallet = null;
             last_seen = 0;
@@ -565,10 +577,13 @@ namespace IXICore
                     {
                         if (myPresenceType == 'M' || myPresenceType == 'H')
                         {
-                            // check balance
-                            if (IxianHandler.getWalletBalance(ka.walletAddress) < ConsensusConfig.minimumMasterNodeFunds)
+                            if (ConsensusConfig.minimumMasterNodeFunds > 0)
                             {
-                                return false;
+                                // check balance
+                                if (IxianHandler.getWalletBalance(ka.walletAddress) < ConsensusConfig.minimumMasterNodeFunds)
+                                {
+                                    return false;
+                                }
                             }
                         }
                     }
@@ -581,29 +596,29 @@ namespace IXICore
 
                 lock (presences)
                 {
-                    byte[] address = wallet;
-                    Presence listEntry = presences.Find(x => x.wallet.SequenceEqual(address));
-                    if (listEntry == null && wallet.SequenceEqual(IxianHandler.getWalletStorage().getPrimaryAddress()))
+                    Address address = wallet;
+                    Presence listEntry = presences.Find(x => x.wallet.addressNoChecksum.SequenceEqual(address.addressNoChecksum));
+                    if (listEntry == null && wallet.addressNoChecksum.SequenceEqual(IxianHandler.getWalletStorage().getPrimaryAddress().addressNoChecksum))
                     {
                         Logging.warn("My entry was removed from local PL, readding.");
                         curNodePresence.addresses.Clear();
                         curNodePresence.addresses.Add(curNodePresenceAddress);
                         updateEntry(curNodePresence);
-                        listEntry = presences.Find(x => x.wallet.SequenceEqual(address));
+                        listEntry = presences.Find(x => x.wallet.addressNoChecksum.SequenceEqual(address.addressNoChecksum));
                     }
 
                     // Check if no such wallet found in presence list
                     if (listEntry == null)
                     {
                         // request for additional data
-                        CoreProtocolMessage.broadcastGetPresence(wallet, endpoint);
+                        CoreProtocolMessage.broadcastGetPresence(wallet.addressWithChecksum, endpoint);
                         return false;
                     }
 
 
-                    if(!ka.verifySignature(listEntry.pubkey))
+                    if(!ka.verify(listEntry.pubkey, IxianHandler.getMinSignerPowDifficulty(IxianHandler.getLastBlockHeight() + 1)))
                     {
-                        Logging.warn("[PL] KEEPALIVE tampering for {0} {1}, incorrect Sig.", Base58Check.Base58CheckEncoding.EncodePlain(listEntry.wallet), ka.hostName);
+                        Logging.warn("[PL] KEEPALIVE tampering for {0} {1}, incorrect Sig.", listEntry.wallet.ToString(), ka.hostName);
                         return false;
                     }
 
@@ -631,18 +646,19 @@ namespace IXICore
                             // Check for tampering. Includes a +300, -30 second synchronization zone
                             if ((currentTime - ka.timestamp) > expiration_time)
                             {
-                                Logging.warn(string.Format("[PL] Received expired KEEPALIVE for {0} {1}. Timestamp {2}", Base58Check.Base58CheckEncoding.EncodePlain(listEntry.wallet), pa.address, ka.timestamp));
+                                Logging.warn("[PL] Received expired KEEPALIVE for {0} {1}. Timestamp {2}", listEntry.wallet.ToString(), pa.address, ka.timestamp);
                                 return false;
                             }
 
                             if ((currentTime - ka.timestamp) < -30)
                             {
-                                Logging.warn(string.Format("[PL] Potential KEEPALIVE tampering for {0} {1}. Timestamp {2}", Base58Check.Base58CheckEncoding.EncodePlain(listEntry.wallet), pa.address, ka.timestamp));
+                                Logging.warn("[PL] Potential KEEPALIVE tampering for {0} {1}. Timestamp {2}", listEntry.wallet.ToString(), pa.address, ka.timestamp);
                                 return false;
                             }
 
                             // Update the timestamp
                             pa.lastSeenTime = ka.timestamp;
+                            listEntry.powSolution = ka.powSolution;
                             pa.signature = ka.signature;
                             pa.version = ka.version;
                             if (pa.type != ka.nodeType)
@@ -650,21 +666,17 @@ namespace IXICore
                                 lock (presenceCount)
                                 {
                                     presenceCount[pa.type]--;
-                                    if (!presenceCount.ContainsKey(ka.nodeType))
-                                    {
-                                        presenceCount.Add(ka.nodeType, 0);
-                                    }
                                     presenceCount[ka.nodeType]++;
                                 }
                             }
                             pa.type = ka.nodeType;
-                            //Console.WriteLine("[PL] LASTSEEN for {0} - {1} set to {2}", hostname, deviceid, pa.lastSeenTime);
+                            //Logging.info("[PL] LASTSEEN for {0} - {1} set to {2}", hostname, deviceid, pa.lastSeenTime);
                             return true;
                         }
                     }
                     else
                     {
-                        if (wallet.SequenceEqual(IxianHandler.getWalletStorage().getPrimaryAddress()))
+                        if (wallet.addressNoChecksum.SequenceEqual(IxianHandler.getWalletStorage().getPrimaryAddress().addressNoChecksum))
                         {
                             curNodePresence.addresses.Clear();
                             curNodePresence.addresses.Add(curNodePresenceAddress);
@@ -673,7 +685,7 @@ namespace IXICore
                         }
                         else
                         {
-                            CoreProtocolMessage.broadcastGetPresence(wallet, endpoint);
+                            CoreProtocolMessage.broadcastGetPresence(wallet.addressWithChecksum, endpoint);
                             return false;
                         }
                     }
@@ -730,12 +742,12 @@ namespace IXICore
                                 // Check if timestamp is older than 300 seconds
                                 if ((currentTime - pa.lastSeenTime) > expiration_time)
                                 {
-                                    Logging.info(string.Format("Expired lastseen for {0} / {1}", pa.address, Crypto.hashToString(pa.device)));
+                                    Logging.info("Expired lastseen for {0} / {1}", pa.address, Crypto.hashToString(pa.device));
                                     removeAddressEntry(pr.wallet, pa);
                                 }
                                 else if ((currentTime - pa.lastSeenTime) < -30) // future time + 30 seconds amortization
                                 {
-                                    Logging.info(string.Format("Expired future lastseen for {0} / {1}", pa.address, Crypto.hashToString(pa.device)));
+                                    Logging.info("Expired future lastseen for {0} / {1}", pa.address, Crypto.hashToString(pa.device));
                                     removeAddressEntry(pr.wallet, pa);
                                 }
                             }
@@ -777,7 +789,10 @@ namespace IXICore
             lock (presences)
             {
                 presences.Clear();
-                presenceCount = new Dictionary<char, long>();
+                foreach (var p in presenceCount)
+                {
+                    presenceCount[p.Key] = 0;
+                }
             }
         }
 
@@ -793,18 +808,16 @@ namespace IXICore
             return 0;
         }
 
-        public static Presence getPresenceByAddress(byte[] address_or_pubkey)
+        public static Presence getPresenceByAddress(Address address)
         {
-            if (address_or_pubkey == null)
+            if (address == null)
                 return null;
 
             try
             {
-                byte[] address = (new Address(address_or_pubkey)).address;
-
                 lock (presences)
                 {
-                    return presences.Find(x => x.wallet.SequenceEqual(address));
+                    return presences.Find(x => x.wallet.addressNoChecksum.SequenceEqual(address.addressNoChecksum));
                 }
             }
             catch(Exception e)
@@ -848,9 +861,9 @@ namespace IXICore
         {
             lock (presences)
             {
-                int address_len = 36; // This is set to the minimum wallet length
+                int address_len = 33; // This is set to the minimum wallet length
                 byte[] selector = PresenceOrderedEnumerator.GenerateSelectorFromRandom(rnd_bytes.Take(address_len).ToArray());
-                var sorted_presences = presences.FindAll(x => x.addresses.Find(y => y.type == 'M' || y.type == 'H') != null).OrderBy(x => x.wallet, new ByteArrayComparer());
+                var sorted_presences = presences.FindAll(x => x.addresses.Find(y => y.type == 'M' || y.type == 'H') != null).OrderBy(x => x.wallet.addressNoChecksum, new ByteArrayComparer());
                 return new PresenceOrderedEnumerator(sorted_presences, address_len, selector, target_count);
             }
         }

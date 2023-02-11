@@ -71,7 +71,7 @@ namespace IXICore.Meta
     public class Activity
     {
         private string _id = null;
-        private SortedDictionary<byte[], IxiNumber> _cachedToListArray = new SortedDictionary<byte[], IxiNumber>(new ByteArrayComparer());
+        private Dictionary<Address, IxiNumber> _cachedToListArray = new Dictionary<Address, IxiNumber>(new AddressComparer());
 
         public byte[] seedHash { get; set; }
         public string wallet { get; set; }
@@ -105,7 +105,7 @@ namespace IXICore.Meta
             this.txid = txid;
         }
 
-        public Activity(byte[] seed_hash, string wallet, string from, SortedDictionary<byte[], IxiNumber> to_list, int type, byte[] data, string value, long timestamp, int status, ulong block_height, string txid)
+        public Activity(byte[] seed_hash, string wallet, string from, IDictionary<Address, Transaction.ToEntry> to_list, int type, byte[] data, string value, long timestamp, int status, ulong block_height, string txid)
         {
             this.seedHash = seed_hash;
             this.wallet = wallet;
@@ -133,10 +133,10 @@ namespace IXICore.Meta
                     }
                     raw_data.AddRange(Encoding.UTF8.GetBytes(wallet));
                     raw_data.AddRange(Encoding.UTF8.GetBytes(from));
-                    SortedDictionary<byte[], IxiNumber> tmp_to_list = getToListAsArray();
+                    Dictionary<Address, IxiNumber> tmp_to_list = getToListAsArray();
                     foreach (var entry in tmp_to_list)
                     {
-                        raw_data.AddRange(entry.Key);
+                        raw_data.AddRange(entry.Key.addressWithChecksum);
                         raw_data.AddRange(entry.Value.getAmount().ToByteArray());
                     }
                     raw_data.AddRange(BitConverter.GetBytes(type));
@@ -158,7 +158,7 @@ namespace IXICore.Meta
             }
         }
 
-        public SortedDictionary<byte[], IxiNumber> getToListAsArray()
+        public Dictionary<Address, IxiNumber> getToListAsArray()
         {
             if(_cachedToListArray.Count > 0)
             {
@@ -181,19 +181,21 @@ namespace IXICore.Meta
                 }
                 byte[] address = Base58Check.Base58CheckEncoding.DecodePlain(split_to[0]);
                 IxiNumber amount = new IxiNumber(new BigInteger(Convert.FromBase64String(split_to[1])));
-                _cachedToListArray.AddOrReplace(address, amount);
+                _cachedToListArray.AddOrReplace(new Address(address), amount);
             }
 
             return _cachedToListArray;
         }
 
-        public bool setToListArray(SortedDictionary<byte[], IxiNumber> to_list)
+        public bool setToListArray(IDictionary<Address, Transaction.ToEntry> to_list)
         {
-            _cachedToListArray = to_list;
+            _cachedToListArray.Clear();
+
             toList = "";
-            foreach (var to in _cachedToListArray)
+            foreach (var to in to_list)
             {
-                toList = string.Format("{0}||{1}:{2}", toList, Base58Check.Base58CheckEncoding.EncodePlain(to.Key), Convert.ToBase64String(to.Value.getAmount().ToByteArray()));
+                toList = string.Format("{0}||{1}:{2}", toList, to.Key.ToString(), Convert.ToBase64String(to.Value.amount.getAmount().ToByteArray()));
+                _cachedToListArray.AddOrReplace(to.Key, to.Value.amount);
             }
 
             return true;
@@ -232,6 +234,7 @@ namespace IXICore.Meta
             public byte[] data;
             public ActivityStatus status;
             public ulong blockHeight;
+            public long timestamp;
         }
 
         private struct MessageDataValue
@@ -577,9 +580,16 @@ namespace IXICore.Meta
 
             bool result = false;
 
-            if (CoreConfig.walletNotifyCommand != "")
+            try
             {
-                IxiUtils.executeProcess(CoreConfig.walletNotifyCommand, Encoding.UTF8.GetString(activity.data), false);
+                if (CoreConfig.walletNotifyCommand != "")
+                {
+                    IxiUtils.executeProcess(CoreConfig.walletNotifyCommand, Transaction.getTxIdString(activity.data), false);
+                }
+            }
+            catch (Exception e)
+            {
+                Logging.error("Exception occurred in Activity:insertActivityInternal: " + e);
             }
 
             lock (storageLock)
@@ -591,14 +601,14 @@ namespace IXICore.Meta
             return result;
         }
 
-        public static void updateStatus(byte[] data, ActivityStatus status, ulong block_height)
+        public static void updateStatus(byte[] data, ActivityStatus status, ulong block_height, long timestamp = 0)
         {
             // Make a copy of the block for the queue storage message processing
             QueueStorageMessage message = new QueueStorageMessage
             {
                 code = QueueStorageCode.updateStatus,
                 retryCount = 0,
-                data = new MessageDataStatus { data = data, status = status, blockHeight = block_height }
+                data = new MessageDataStatus { data = data, status = status, blockHeight = block_height, timestamp = timestamp }
             };
 
             lock (queueStatements)
@@ -608,27 +618,44 @@ namespace IXICore.Meta
         }
 
 
-        private static bool updateStatusInternal(byte[] data, ActivityStatus status, ulong block_height)
+        private static bool updateStatusInternal(byte[] data, ActivityStatus status, ulong block_height, long timestamp)
         {
             bool result = false;
 
-            if (CoreConfig.walletNotifyCommand != "")
+            try
             {
-                IxiUtils.executeProcess(CoreConfig.walletNotifyCommand, Encoding.UTF8.GetString(data), false);
+                if (CoreConfig.walletNotifyCommand != "")
+                {
+                    IxiUtils.executeProcess(CoreConfig.walletNotifyCommand, Transaction.getTxIdString(data), false);
+                }
+            }
+            catch (Exception e)
+            {
+                Logging.error("Exception occurred in Activity:updateStatusInternal: " + e);
             }
 
             lock (storageLock)
             {
+                List<object> sqlParams = new List<object>();
+                string sql = "UPDATE `activity` SET `status` = ?";
+                sqlParams.Add(status);
+
                 if (block_height > 0)
                 {
-                    string sql = "UPDATE `activity` SET `status` = ?, `blockHeight` = ? WHERE `data` = ?";
-                    result = executeSQL(sql, status, (long)block_height, data);
+                    sql += ", `blockHeight` = ?";
+                    sqlParams.Add((long)block_height);
                 }
-                else
+
+                if (timestamp > 0)
                 {
-                    string sql = "UPDATE `activity` SET `status` = ? WHERE `data` = ?";
-                    result = executeSQL(sql, status, data);
+                    sql += ", `timestamp` = ?";
+                    sqlParams.Add(timestamp);
                 }
+
+                sql += " WHERE `data` = ?";
+                sqlParams.Add(data);
+
+                result = executeSQL(sql, sqlParams.ToArray());
             }
 
             return result;
@@ -654,9 +681,16 @@ namespace IXICore.Meta
         {
             bool result = false;
 
-            if (CoreConfig.walletNotifyCommand != "")
+            try
             {
-                IxiUtils.executeProcess(CoreConfig.walletNotifyCommand, Encoding.UTF8.GetString(data), false);
+                if (CoreConfig.walletNotifyCommand != "")
+                {
+                    IxiUtils.executeProcess(CoreConfig.walletNotifyCommand, Transaction.getTxIdString(data), false);
+                }
+            }
+            catch (Exception e)
+            {
+                Logging.error("Exception occurred in Activity:updateValueInternal: " + e);
             }
 
             lock (storageLock)
@@ -728,7 +762,7 @@ namespace IXICore.Meta
                         else if (active_message.code == QueueStorageCode.updateStatus)
                         {
                             MessageDataStatus mds = (MessageDataStatus)active_message.data;
-                            updateStatusInternal(mds.data, mds.status, mds.blockHeight);
+                            updateStatusInternal(mds.data, mds.status, mds.blockHeight, mds.timestamp);
                         }
                         else if (active_message.code == QueueStorageCode.updateValue)
                         {

@@ -18,7 +18,7 @@ using System.Linq;
 
 namespace IXICore
 {
-    public class AddressComparer : IComparer<byte[]>
+    public class PresenceByteArrayComparer : IComparer<byte[]>
     {
         public int Compare(byte[] x, byte[] y)
         {
@@ -53,7 +53,7 @@ namespace IXICore
                 throw new ArgumentException("Selector must be of shorter or equal length to address.");
             }
             SelectorIndexes = selector;
-            Addresses = new SortedDictionary<byte[], string[]>(new AddressComparer());
+            Addresses = new SortedDictionary<byte[], string[]>(new PresenceByteArrayComparer());
             //
             List<HashSet<string>> RepetitionsIP = new List<HashSet<string>>();
             // Please note:
@@ -62,11 +62,11 @@ namespace IXICore
             //
             foreach (var p in presences)
             {
-                if(p.wallet.Length < selector.Length)
+                if(p.wallet.addressNoChecksum.Length < selector.Length)
                 {
                     Logging.warn(String.Format("Address {0} is shorter than the given selector and cannot be permuted properly. (address: {1}, selector: {2}). Ignoring this address.",
-                        Base58Check.Base58CheckEncoding.EncodePlain(p.wallet),
-                        p.wallet.Length,
+                        p.wallet.ToString(),
+                        p.wallet.addressNoChecksum.Length,
                         selector.Length));
                     continue;
                 }
@@ -75,7 +75,7 @@ namespace IXICore
                 {
                     AddRepetition(RepetitionsIP, ip);
                 }
-                Addresses.Add(permute(p.wallet, SelectorIndexes), ips);
+                Addresses.Add(permute(p.wallet.addressNoChecksum, SelectorIndexes), ips);
             }
 
             // Reduce number of addresses

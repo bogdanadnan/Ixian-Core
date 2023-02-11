@@ -14,7 +14,6 @@
     <Compile Include="$(MSBuildThisFileDirectory)Address\AddressMatcher.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)API\GenericAPIServer.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Block\Block.cs" />
-    <Compile Include="$(MSBuildThisFileDirectory)Block\BlockHeader.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Block\BlockHeaderStorage.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Block\BlockSignature.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Crypto\ASNParser.cs" />
@@ -33,7 +32,6 @@
     <Compile Include="$(MSBuildThisFileDirectory)Inventory\InventoryItemBlock.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Inventory\InventoryItemKeepAlive.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Inventory\InventoryItemSignature.cs" />
-    <Compile Include="$(MSBuildThisFileDirectory)Inventory\InventoryItemSignerPow.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Meta\Activity.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Meta\ConsensusConfig.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Meta\CoreConfig.cs" />
@@ -82,6 +80,7 @@
     <Compile Include="$(MSBuildThisFileDirectory)Transaction\Transaction.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Transaction\TransactionInclusion.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)UPnP\UPnP.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Utils\AddressComparer.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Utils\Base58CheckEncoding.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Utils\BitWriter.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Utils\ByteArrayComparer.cs" />
