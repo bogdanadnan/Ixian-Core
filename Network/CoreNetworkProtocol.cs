@@ -722,7 +722,7 @@ namespace IXICore
         ///  This function is used to ensure that the remote endpoing has listed the correct IP and port information for their `PresenceList` entry.
         /// </remarks>
         /// <param name="endpoint">Target endpoint to verify for connectivity.</param>
-        public static void subscribeToEvents(RemoteEndpoint endpoint)
+        public static void subscribeToEvents(RemoteEndpoint endpoint, List<string> solversList)
         {
             if (endpoint.presenceAddress.type != 'M' && endpoint.presenceAddress.type != 'H')
             {
@@ -733,10 +733,15 @@ namespace IXICore
 
             // Subscribe to transaction events, for own addresses
             var my_addresses = IxianHandler.getWalletStorage().getMyAddresses();
-            Cuckoo filter = new Cuckoo(my_addresses.Count());
+            Cuckoo filter = new Cuckoo(my_addresses.Count() + solversList.Count());
             foreach(var addr in my_addresses)
             {
                 filter.Add(addr.addressNoChecksum);
+            }
+            foreach (var solver in solversList)
+            {
+                Console.WriteLine("Attaching to {0}", solver);
+                filter.Add(new Address(solver).addressNoChecksum);
             }
             byte[] filter_data = filter.getFilterBytes();
             byte[] event_data = NetworkEvents.prepareEventMessageData(NetworkEvents.Type.transactionFrom, filter_data);

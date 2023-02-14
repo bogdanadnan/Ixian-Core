@@ -654,9 +654,10 @@ namespace IXICore.Network
                     NetworkClient client;
                     lock (networkClients)
                     {
-                        client = networkClients[0];
-                        networkClients.RemoveAt(0);
+                        client = networkClients.OrderByDescending(n => n.failures).First();
+                        networkClients.Remove(client);
                     }
+                    Console.WriteLine("Disconnecting from endpoint {0} with {1} failures", client.remoteIP.ToString(), client.failures);
                     CoreProtocolMessage.sendBye(client, ProtocolByeCode.bye, "Disconnected for shuffling purposes.", "", false);
                     client.stop();
                 }

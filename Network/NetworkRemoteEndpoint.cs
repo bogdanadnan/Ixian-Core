@@ -79,6 +79,7 @@ namespace IXICore.Network
         public PresenceAddress presenceAddress = null;
 
         protected bool running = false;
+        public int failures = 0;
 
         // Maintain a list of subscribed event addresses with event type
         private Dictionary<NetworkEvents.Type, Cuckoo> subscribedFilters = new Dictionary<NetworkEvents.Type, Cuckoo>();
