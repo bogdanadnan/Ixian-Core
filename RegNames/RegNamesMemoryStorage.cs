@@ -151,9 +151,9 @@ namespace IXICore.RegNames
             lock (names)
             {
                 fs.Write(BitConverter.GetBytes(rewardPool.getBytes().Length), 0, 4);
-                fs.Write(rewardPool.getBytes());
+                fs.Write(rewardPool.getBytes(), 0, rewardPool.getBytes().Length);
 
-                fs.Write(BitConverter.GetBytes(highestExpirationBlockHeight));
+                fs.Write(BitConverter.GetBytes(highestExpirationBlockHeight), 0, 8);
 
                 fs.Write(BitConverter.GetBytes(names.LongCount()), 0, 8);
 
