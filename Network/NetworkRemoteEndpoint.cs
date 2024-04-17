@@ -912,6 +912,8 @@ namespace IXICore.Network
                 case ProtocolMessageCode.updatePresence:
                 case ProtocolMessageCode.keepAlivesChunk:
                 case ProtocolMessageCode.getKeepAlives:
+                case ProtocolMessageCode.transactionData:
+                case ProtocolMessageCode.transactionData2:
                     lock (sendQueueMessagesHighPriority)
                     {
                         addMessageToSendQueue(sendQueueMessagesHighPriority, message);
@@ -923,8 +925,6 @@ namespace IXICore.Network
                 case ProtocolMessageCode.transactionsChunk2:
                 case ProtocolMessageCode.transactionsChunk3:
                 case ProtocolMessageCode.blockTransactionsChunk:
-                case ProtocolMessageCode.transactionData:
-                case ProtocolMessageCode.transactionData2:
                     lock (sendQueueMessagesLowPriority)
                     {
                         addMessageToSendQueue(sendQueueMessagesLowPriority, message);
