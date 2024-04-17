@@ -11,18 +11,19 @@
 // MIT License for more details.
 
 using IXICore.Network;
+using IXICore.RegNames;
 using IXICore.Utils;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Numerics;
 
 namespace IXICore.Meta
 {
     public enum NetworkType
     {
         main = 0,
-        test = 1
+        test = 1,
+        reg = 2
     }
 
     public enum NodeStatus
@@ -39,6 +40,7 @@ namespace IXICore.Meta
         // Required
         public abstract ulong getHighestKnownNetworkBlockHeight();
         public abstract Block getBlockHeader(ulong blockNum);
+        public abstract byte[] getBlockHash(ulong blockNum);
         public abstract Block getLastBlock();
         public abstract ulong getLastBlockHeight();
         public abstract int getLastBlockVersion();
@@ -55,6 +57,10 @@ namespace IXICore.Meta
         public virtual void receivedBlockHeader(Block block_header, bool verified) { }
 
         public abstract IxiNumber getMinSignerPowDifficulty(ulong blockNum);
+
+        public abstract byte[] calculateRegNameChecksumFromUpdatedDataRecords(byte[] name, List<RegisteredNameDataRecord> dataRecords, ulong sequence, Address nextPkHash);
+        public abstract byte[] calculateRegNameChecksumForRecovery(byte[] name, Address recoveryHash, ulong sequence, Address nextPkHash);
+        public abstract RegisteredNameRecord getRegName(byte[] name, bool useAbsoluteId);
     }
 
     public static class IxianHandler
@@ -75,11 +81,12 @@ namespace IXICore.Meta
         /// Network type designator.
         /// </summary>
         public static NetworkType networkType { get; private set; } = NetworkType.main;
-       
+
         /// <summary>
-        /// Testnet designator. If false the node can only connect to mainnet, if true it can only connect to testnet.
+        /// Testnet designator. If false the node can only connect to mainnet, if true it can only connect to testnet or regnet.
         /// </summary>
         public static bool isTestNet { get; private set; } = false;
+        public static bool isRegNet { get; private set; } = false;
 
         public static Address primaryWalletAddress = null;
         public static Dictionary<byte[], WalletStorage> wallets = new Dictionary<byte[], WalletStorage>(new ByteArrayComparer());
@@ -110,6 +117,20 @@ namespace IXICore.Meta
                         ConsensusConfig.ixianChecksumLock = ConsensusConfig.ixianChecksumLockMainNet;
                     }
                     isTestNet = false;
+                    isRegNet = false;
+                    break;
+
+                case NetworkType.reg:
+                    if (checksum_lock != null)
+                    {
+                        ConsensusConfig.ixianChecksumLock = checksum_lock;
+                    }
+                    else
+                    {
+                        ConsensusConfig.ixianChecksumLock = ConsensusConfig.ixianChecksumLockRegNet;
+                    }
+                    isRegNet = true;
+                    isTestNet = true;
                     break;
 
                 case NetworkType.test:
@@ -122,6 +143,7 @@ namespace IXICore.Meta
                         ConsensusConfig.ixianChecksumLock = ConsensusConfig.ixianChecksumLockTestNet;
                     }
                     isTestNet = true;
+                    isRegNet = false;
                     break;
             }
         }
@@ -200,6 +222,12 @@ namespace IXICore.Meta
             return handlerClass.getBlockHeader(blockNum);
         }
 
+        public static byte[] getBlockHash(ulong blockNum)
+        {
+            verifyHandler();
+            return handlerClass.getBlockHash(blockNum);
+        }
+
         public static void parseProtocolMessage(ProtocolMessageCode code, byte[] data, RemoteEndpoint endpoint)
         {
             verifyHandler();
@@ -217,6 +245,24 @@ namespace IXICore.Meta
         {
             verifyHandler();
             return handlerClass.getMinSignerPowDifficulty(blockNum);
+        }
+
+        public static byte[] calculateRegNameChecksumForRecovery(byte[] name, Address recoveryHash, ulong sequence, Address nextPkHash)
+        {
+            verifyHandler();
+            return handlerClass.calculateRegNameChecksumForRecovery(name, recoveryHash, sequence, nextPkHash);
+        }
+
+        public static byte[] calculateRegNameChecksumFromUpdatedRecords(byte[] name, List<RegisteredNameDataRecord> dataRecords, ulong sequence, Address nextPkHash)
+        {
+            verifyHandler();
+            return handlerClass.calculateRegNameChecksumFromUpdatedDataRecords(name, dataRecords, sequence, nextPkHash);
+        }
+
+        public static RegisteredNameRecord getRegName(byte[] name, bool useAbsoluteId = true)
+        {
+            verifyHandler();
+            return handlerClass.getRegName(name, useAbsoluteId);
         }
 
         public static WalletStorage getWalletStorage(Address walletAddress = null)
